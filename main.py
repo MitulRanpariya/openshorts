@@ -38,6 +38,7 @@ import gemini_worker
 import hook_grounding
 import layout_picker
 import llm_backend
+import clip_boundaries
 import yt_account
 import twitch_signals
 from clip_selection import (build_transcript_windows, clip_count_targets,
@@ -2101,6 +2102,11 @@ def apply_watermark(video_path, output_path=None):
     return False
 
 
+def clip_refine_enabled():
+    """CLIP_REFINE=0 restores the upstream word-snap-only boundaries."""
+    return os.environ.get("CLIP_REFINE", "1").strip() != "0"
+
+
 def qc_enabled():
     """RENDER_QC=1/0; on by default with the hd preset (one decode per clip)."""
     from ffmpeg_utils import hd_preset
@@ -2793,10 +2799,23 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         if heat:
             print(f"   👀 Viewer clips fall in {len(heat)} window(s).")
 
-        def _payload(ws):
+        all_sentences = clip_boundaries.sentences(words) if clip_refine_enabled() else []
+
+        def _timed_sentences(w):
+            # The detail pass used to see each window as one block of prose and
+            # had to guess where inside it a sentence starts. [start, text]
+            # pairs (0.1 s) let it pick real boundaries; the end of a clip is
+            # the start of the sentence after its last one.
+            return [[round(x["start"], 1), x["text"]] for x in all_sentences
+                    if x["start"] >= w["start"] - 0.05 and x["end"] <= w["end"] + 0.05]
+
+        def _payload(ws, timed=False):
             out = []
             for w in ws:
                 item = {"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]}
+                if timed and all_sentences:
+                    del item["text"]
+                    item["sentences"] = _timed_sentences(w)
                 h = heat.get(w["id"])
                 if h:
                     item["viewers_clipped"] = h["clips"]
@@ -2849,7 +2868,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
                     video_duration=video_duration, language=language,
                     min_clips=lo, max_clips=hi,
                     min_secs=min_secs, max_secs=max_secs,
-                    windows_json=json.dumps(_payload(ws), ensure_ascii=False))
+                    windows_json=json.dumps(_payload(ws, timed=True), ensure_ascii=False))
             return build
 
         shorts = []
@@ -2890,12 +2909,28 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             shorts = trim_to_best(shorts, max_clips)
             print(f"   Kept the {max_clips} best-scoring clip(s) of "
                   f"{max_clips + dropped}.")
+        refine = clip_refine_enabled()
+        if refine:
+            # Schema-valid is not sane: a range outside the source or a window
+            # id the model invented cannot be cut.
+            window_ids = {w["id"] for w in windows}
+            sane = [s for s in shorts
+                    if clip_boundaries.valid_proposal(s, video_duration, window_ids)]
+            if len(sane) < len(shorts):
+                print(f"   Dropped {len(shorts) - len(sane)} malformed clip proposal(s).")
+            shorts = sane
         # Snap each proposed clip onto real word boundaries (+ a bit of silence).
         for s in shorts:
             # Keep the model's raw proposal: it is how boundary accuracy is
             # measured (distance to the nearest word before the snap; p90 was
             # 0.4-0.5 s on 8 talks, 21-sep-2026, so the snap reaches it).
             s["proposed"] = [s.get("start", 0), s.get("end", 0)]
+        if refine:
+            # Whole sentences first (setup and payoff in, questions with their
+            # answers), then the word snap below trims into the pauses.
+            clip_boundaries.refine_all(shorts, words, video_duration,
+                                       min_secs, max_secs, language)
+        for s in shorts:
             ns, ne = snap_clip_to_words(s.get("start", 0), s.get("end", 0), words, video_duration,
                                         min_duration=min_secs, max_duration=max_secs)
             s["start"], s["end"] = ns, ne
@@ -2904,6 +2939,12 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             print(f"   Dropped {len(shorts) - len(deduped)} clip(s) overlapping a "
                   f"better-scored one.")
             shorts = deduped
+        if refine:
+            similar = clip_boundaries.dedupe_similar(shorts, words)
+            if len(similar) < len(shorts):
+                print(f"   Dropped {len(shorts) - len(similar)} clip(s) repeating a "
+                      f"better-scored one's content.")
+                shorts = similar
 
         # Aggregate cost across both passes.
         cost_analysis = None
