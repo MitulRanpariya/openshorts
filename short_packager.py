@@ -150,18 +150,22 @@ def _draw_block(img, lines_spec, center_y):
     draw = ImageDraw.Draw(img)
     w = img.width
     rows = []
-    for text, font, fill in lines_spec:
-        for line in _wrap(draw, text, font, int(w * 0.84)):
-            box = draw.textbbox((0, 0), line, font=font)
-            rows.append((line, font, fill, box[3] - box[1]))
     gap = int(w * 0.02)
-    total = sum(r[3] for r in rows) + gap * max(0, len(rows) - 1)
+    block_gap = int(w * 0.05)     # between the title and the context line
+    for n, (text, font, fill) in enumerate(lines_spec):
+        lines = _wrap(draw, text, font, int(w * 0.84))
+        for k, line in enumerate(lines):
+            # Line height from the font (not the glyphs) keeps rows even.
+            ascent, descent = font.getmetrics()
+            after = block_gap if (k == len(lines) - 1 and n < len(lines_spec) - 1) else gap
+            rows.append((line, font, fill, ascent + descent, after))
+    total = sum(r[3] + r[4] for r in rows) - (rows[-1][4] if rows else 0)
     y = int(center_y - total / 2)
-    for line, font, fill, height in rows:
+    for line, font, fill, height, after in rows:
         lw = draw.textlength(line, font=font)
         draw.text(((w - lw) / 2, y), line, font=font, fill=fill,
                   stroke_width=max(2, int(font.size * 0.06)), stroke_fill=(0, 0, 0))
-        y += height + gap
+        y += height + after
 
 
 def frame_at(video, t, out_png):

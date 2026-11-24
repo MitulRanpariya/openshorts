@@ -58,6 +58,22 @@ Self-hosting is genuinely free and always will be. It costs you a machine, your 
 
 ---
 
+## ClipForge Studio (this fork)
+
+This fork adds a podcast-focused editorial layer on top of OpenShorts:
+- a single `clipforge.config.yaml` for every credential;
+- whole-episode understanding and sentence-exact, explainable clip picking;
+- a fixed 1080×1920 HD export with cleaned-up speech audio;
+- automatic QC on every file;
+- creator packaging: intro or context card, your voiceover, logo, source credit, outro;
+- rights-gated direct YouTube upload and auto-upload (private by default);
+- performance insights from the official APIs only.
+
+Start here: **[docs/clipforge/USER_GUIDE.md](docs/clipforge/USER_GUIDE.md)**. Quick start:
+`./clipforge.sh setup && ./clipforge.sh start`.
+
+---
+
 ## What's Inside
 
 ### 1. Clip Generator

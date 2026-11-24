@@ -1,63 +1,49 @@
 # Implementation status
 
-| Phase | State | Notes |
+Branch `feat/clipforge-studio` on `MitulRanpariya/openshorts` (fork of `mutonby/openshorts`,
+nothing pushed upstream). Plan: `PLAN.md`. How to use: `USER_GUIDE.md`.
+
+| Phase | State | Delivered |
 |---|---|---|
-| 0 Fork, branch, baseline | ✅ done | see `BASELINE_AUDIT.md` |
-| 1 Config file + self-host UX | ✅ done | `clipforge_config.py`, example YAML, server-side key fallbacks, dashboard honours server keys |
-| 2 HD render, audio, QC gate | ✅ done | `RENDER_PRESET=hd`, speech chain, `render_qc.py`, QC badge; E2E verified |
-| 3 Clip discovery | 🔄 in progress | done: sentence boundaries, question/answer pull-in, context flags + penalty, content dedupe, proposal validation, timed sentences in detail prompt. next: source map, score dimensions, benchmark |
-| 4 Enhancement studio | — | |
-| 5 Metadata + YouTube upload | — | needs OAuth client from owner |
-| 6 Analytics | — | |
-| 7 Hardening, docs, release | — | |
+| 0 Fork, branch, baseline | ✅ | `BASELINE_AUDIT.md`; repo-local git identity |
+| 1 Config file + self-host UX | ✅ | `clipforge_config.py`, example YAML, server-held keys honoured by API and dashboard |
+| 2 HD render, audio, QC | ✅ | `RENDER_PRESET=hd`, speech chain, `render_qc.py`, QC badge |
+| 3 Clip discovery | ✅ | `source_map.py`, `clip_boundaries.py`, timed sentences, score dimensions, content dedupe |
+| 4 Enhancement studio | ✅ | `short_packager.py`, asset upload, finish modal, keep/reject/pin, branding config, auto-package |
+| 5 Metadata + YouTube | ✅ code / ⏳ owner setup | `youtube_publisher.py`, `publish_metadata.py`, rights record, auto-upload; needs the owner's OAuth client |
+| 6 Analytics | ✅ code / ⏳ data | `youtube_analytics.py`, insights card; needs uploaded clips |
+| 7 Hardening, docs | ✅ | launcher `clipforge.sh`, docs, security review of new code |
 
-## Test log
-- 2026-11-25 baseline: pytest 2531 passed / 119 skipped; dashboard lint + build pass.
-- 2026-11-25 phase 1: pytest 2547 passed / 119 skipped; 18 new config tests. `TestVolume`
-  timing tests in `test_queue_saturation.py` fail under host load (load avg ~9) on the
-  untouched upstream code too — wall-clock flake, not a regression. Dashboard lint + build pass.
+## Verification (2026-11-25)
+- **Automated**
+  - pytest: **2815+ passed, 43 skipped** (GPU and Postgres tests skipped: no GPU or Postgres here).
+  - New tests (155+):
+    - `test_clipforge_config`, `test_render_preset`, `test_render_qc`
+    - `test_clip_boundaries`, `test_source_map`, `test_short_packager`
+    - `test_clipforge_endpoints`, `test_youtube_publisher`, `test_youtube_analytics`
+    - additions in `test_clip_selection`
+  - Dashboard: `npm run lint` and `npm run build` pass.
+  - `tests/test_queue_saturation.py::TestVolume` measures event-loop latency in wall-clock time. It fails under heavy host load on untouched upstream code too, and passes when the machine is idle.
+- **Keyless E2E**: synthetic 76 s flite-speech source with `tools/stub_llm_server.py` gave 1 clip at 1080×1920 H.264 High yuv420p, AAC 48 kHz, −14.0 LUFS, QC PASS.
+- **Real E2E with Gemini** (`gemini-3.1-flash-lite`): a 27-minute CC BY podcast by URL through the API.
+  - Download, transcription and render completed in 1,364 s on CPU.
+  - 5 clips, all QC PASS (1080×1920, −14.2 LUFS, −2.0 dBTP). Model cost about $0.01.
+- **Selection re-run with the source map** on the same transcript:
+  - 8 topics and an accurate summary.
+  - 6 clips across 6 different topics (before: 3 of 5 clips from minutes 3–7).
+  - 2 clips honestly flagged. Cost about $0.015.
+- **Live API through the dashboard proxy**: review, rights and packaging on a real clip gave `final_` with QC PASS in about 23 s. Jobs survive a backend restart.
 
-- 2026-11-25 phase 2/3a: full ML stack (CPU torch 2.11) installed; pytest **2762 passed /
-  43 skipped**. E2E on a synthetic 76 s flite-speech 1080p source with `tools/stub_llm_server.py`
-  (no keys): 1 clip, 1080x1920 H.264 High yuv420p 30 fps, AAC 48 kHz, -14.0 LUFS / -2.0 dBTP,
-  QC PASS on all 12 checks; refine moved 1.0-21.0 s to the sentence-complete 0-25.72 s.
-  Wall 331 s on CPU (transcription 62 s, reframe 58 s).
+## Not verified / needs the owner
+- **YouTube OAuth and a real upload.** Needs the Google Cloud OAuth client (USER_GUIDE §7.1). Unaudited API projects upload as private only.
+- **Analytics on real uploads.** Needs uploaded clips plus 1–2 days.
+- **GPU path.** No GPU here; the hd preset adds `-sws_flags` to NVENC args but GPU equivalence tests were not run.
+- **Benchmark of selection quality.** Needs human labels on several episodes (precision@K, context-failure rate). Not built; suggested next step.
+- **Browser click-through of the new dashboard modals.** They are built and lint-clean, and their endpoints are tested, but no interactive browser session was run here.
 
-## Local end-to-end run (no API keys)
-```bash
-python tools/stub_llm_server.py --port 18766 &
-CLIPFORGE_CONFIG=/nonexistent LLM_BASE_URL=http://127.0.0.1:18766/v1 LLM_MODEL=stub \
-RENDER_PRESET=hd CLIP_WORKERS=2 AUTO_HOOK=1 AUTO_LAYOUT=0 \
-python -u main.py -i <source.mp4> -o <out_dir>
-```
-ML stack install (CPU, mirrors the Dockerfile):
-`uv pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0 torchvision==0.26.0`
-then `uv pip install --no-deps -r requirements-cpu.lock`.
-
-## Phase 2 notes
-- `RENDER_PRESET` legacy (default when unset) | hd (set in the example config). hd: fixed
-  1080x1920/1080x1080/1920x1080, `-sws_flags lanczos+accurate_rnd+full_chroma_int`, x264 CRF
-  14 intermediates / 17 delivered, yuv420p High, AAC 48 kHz 192k, speech chain
-  (`SPEECH_CLEANUP`), recut fast path never reprocesses audio, 12 ms join fades.
-- QC (`RENDER_QC`, default on with hd): `<clip>.qc.json` + `clip['qc']`; FAIL = do not deliver/upload.
-- Fixed for all presets: v1 OpenCV fallback now yuv420p (was High 4:4:4).
-
-## Phase 3 notes (so far)
-- `clip_boundaries.py` (`CLIP_REFINE=0` disables): sentences from punctuation/pauses; edges move
-  to sentence starts/ends within 8 s; a preceding question within 12 s is included; dangling
-  English openers pull the start back one sentence; remaining flags (`starts_mid_thought`,
-  `starts_mid_sentence`, `ends_mid_sentence`, `ends_on_question`) are stored as
-  `context_flags` and lower `predicted_score` (original in `predicted_score_model`);
-  content-word dedupe drops a repeated story; malformed proposals dropped.
-- Detail prompt windows carry `sentences: [[start, text]]` instead of untimed prose.
-
-## Phase 1 notes
-- Config file: `clipforge.config.yaml` (git-ignored), template `clipforge.config.example.yaml`.
-  Precedence: real env > `.env` > config file. Loaded only by the API process (`app.py`);
-  job children inherit the filtered env (`child_env`) and never read the file, so the
-  upstream secret denylist still holds (`test_pipeline_code_reads_none_of_the_dropped_secrets`).
-- `/api/config.serverKeys` (self-host only): booleans for gemini/localLlm/uploadPost/
-  uploadPostProfile/elevenlabs/fal. Values never leave the server.
-- Server fallbacks (self-host only, header still wins): ElevenLabs, fal.ai, Upload-Post profile.
-- Dashboard: no longer demands an Upload-Post key to clip; accepts a server-held Gemini key.
-- Self-host app URL is `#app` (landing page left as upstream).
+## Next steps (suggested)
+1. Connect YouTube, upload a few private clips, check the descriptions and credit.
+2. Request the YouTube API audit if public auto-upload is wanted.
+3. Label 3–5 episodes (keep/reject in the dashboard is stored per clip) and tune
+   `clip_selection.SCORE_DIMENSIONS` from what you keep.
+4. Optional: put the launcher behind systemd for always-on auto-upload.
