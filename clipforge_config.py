@@ -64,6 +64,11 @@ KEY_MAP: dict[str, str] = {
     "processing.clip_workers": "CLIP_WORKERS",
     "processing.ffmpeg_encoder": "FFMPEG_ENCODER",
     "processing.job_retention_seconds": "JOB_RETENTION_SECONDS",
+    # Delivery quality (ClipForge Phase 2)
+    "render.quality_preset": "RENDER_PRESET",
+    "render.speech_cleanup": "SPEECH_CLEANUP",
+    "render.loudness_normalize": "AUDIO_NORMALIZE",
+    "render.quality_checks": "RENDER_QC",
     # Clip selection defaults
     "clips.min_seconds": "CLIP_MIN_SECONDS",
     "clips.max_seconds": "CLIP_MAX_SECONDS",
@@ -71,6 +76,9 @@ KEY_MAP: dict[str, str] = {
 
 # Keys whose YAML value is a path; the env var receives the file's contents.
 FILE_KEYS = frozenset({"youtube.download_cookies_file"})
+
+# Flags the code reads as "1"/"0" rather than true/false.
+NUMERIC_FLAGS = frozenset({"SPEECH_CLEANUP", "AUDIO_NORMALIZE", "RENDER_QC"})
 
 # Env vars whose value is a credential: never logged or shown.
 SECRET_ENV = frozenset({
@@ -148,6 +156,8 @@ def load(path: Path) -> dict[str, str]:
         text = _as_env_value(dotted, value)
         if text is None:
             continue
+        if target in NUMERIC_FLAGS and isinstance(value, bool):
+            text = "1" if value else "0"
         if dotted in FILE_KEYS:
             file_path = Path(text).expanduser()
             if not file_path.is_absolute():

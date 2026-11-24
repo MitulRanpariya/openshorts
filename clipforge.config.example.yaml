@@ -58,6 +58,13 @@ processing:
   ffmpeg_encoder: ""       # x264 (default) | nvenc | auto
   job_retention_seconds:   # self-host default 86400 (24 h); 2592000 = 30 days
 
+render:
+  quality_preset: hd       # hd = fixed 1080x1920, lanczos, near-lossless intermediates,
+                           #      48 kHz/192k AAC; legacy = upstream OpenShorts settings
+  speech_cleanup: true     # highpass + light denoise + gentle compression before loudness
+  loudness_normalize: true # -14 LUFS (platform playback level)
+  quality_checks: true     # QC report per clip (ffprobe, black/frozen/silence, loudness)
+
 clips:
   min_seconds:             # default 15
   max_seconds:             # default 60 (YouTube Shorts allow up to 180)

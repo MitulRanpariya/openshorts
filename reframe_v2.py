@@ -46,6 +46,28 @@ DELIVERY_MIN_WIDTH = 1080
 
 # --- pure helpers (CI-testable) --------------------------------------------
 
+# RENDER_PRESET=hd delivers one fixed size per aspect, whatever the source:
+# platforms re-encode anything else to these anyway, and a 4K source's
+# 1216x2160 was a bigger file the viewer never sees. Upscaled sources are
+# flagged by the QC report (render_qc), never hidden.
+HD_SIZES = {
+    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),
+    "16:9": (1920, 1080),
+}
+
+
+def hd_delivery_size(aspect_ratio):
+    """(w, h) for the hd preset at this aspect, or None (legacy / odd aspect)."""
+    import ffmpeg_utils
+    if not ffmpeg_utils.hd_preset():
+        return None
+    for (w, h) in HD_SIZES.values():
+        if abs(aspect_ratio - w / h) < 0.01:
+            return (w, h)
+    return None
+
+
 def delivery_size(orig_w, orig_h, aspect_ratio):
     """Output (width, height) for a reframe of this source.
 
@@ -53,6 +75,9 @@ def delivery_size(orig_w, orig_h, aspect_ratio):
     ``DELIVERY_MIN_WIDTH`` if that crop is narrower. Both dimensions come back
     even (x264/NVENC reject odd ones).
     """
+    fixed = hd_delivery_size(aspect_ratio)
+    if fixed:
+        return fixed
     out_h = orig_h
     out_w = int(out_h * aspect_ratio)
     if out_w > orig_w:

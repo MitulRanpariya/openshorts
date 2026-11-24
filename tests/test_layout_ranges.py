@@ -116,7 +116,7 @@ class TestRemapAcrossCut:
         layout_ranges.write(str(src), [(0, 4, "SPLIT"), (4, 8, "TRACK")])
         # Stand in for ffmpeg: the "cut" is a copy.
         monkeypatch.setattr(recut, "run_cut_concat",
-                            lambda i, segs, out, wd, runner=None: shutil.copy(i, out))
+                            lambda i, segs, out, wd, runner=None, **kw: shutil.copy(i, out))
         served, clean = recut.perform_recut(
             input_path=str(src), segments=[{"start": 2, "end": 6}],
             output_dir=str(tmp_path), clean_name="c.mp4", reframe=False)

@@ -933,6 +933,22 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             <span className="text-muted">/100</span>
                         </span>
                     )}
+                    {/* ClipForge render QC: PASS / WARN / FAIL, reasons on hover. */}
+                    {clip.qc && ['PASS', 'WARN', 'FAIL'].includes(clip.qc.status) && (
+                        <span
+                            className="bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full"
+                            title={(clip.qc.checks || [])
+                                .filter((c) => c.status !== 'PASS')
+                                .map((c) => `${c.status} ${c.name}: ${c.detail}`)
+                                .join('\n') || 'All quality checks passed'}
+                        >
+                            <span className="text-muted">qc </span>
+                            <b className={clip.qc.status === 'PASS' ? 'text-ok'
+                                : clip.qc.status === 'WARN' ? 'text-brass' : 'text-warn'}>
+                                {clip.qc.status}
+                            </b>
+                        </span>
+                    )}
                 </div>
 
                 {/* Auto Edit Overlay if Processing */}

@@ -104,7 +104,8 @@ def test_redact_hides_configured_secrets():
 
 def test_example_file_parses_and_only_uses_known_keys(caplog):
     values = cc.load(REPO / "clipforge.config.example.yaml")
-    assert values == {}  # every value in the example is empty
+    # Only the recommended render defaults carry a value; no credential does.
+    assert set(values) == {"RENDER_PRESET", "SPEECH_CLEANUP", "AUDIO_NORMALIZE", "RENDER_QC"}
     assert "unknown key" not in caplog.text
 
 
@@ -129,3 +130,8 @@ def test_post_profile_falls_back_to_configured_profile(monkeypatch):
     monkeypatch.setenv("UPLOAD_POST_PROFILE", "my-profile")
     assert app.resolve_post_profile(None, None) == "my-profile"
     assert app.resolve_post_profile(None, "chosen") == "chosen"
+
+
+def test_render_flags_become_numeric(tmp_path):
+    p = write(tmp_path, "render: {quality_preset: hd, speech_cleanup: false, quality_checks: true}\n")
+    assert cc.load(p) == {"RENDER_PRESET": "hd", "SPEECH_CLEANUP": "0", "RENDER_QC": "1"}

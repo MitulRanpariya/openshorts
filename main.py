@@ -2101,6 +2101,42 @@ def apply_watermark(video_path, output_path=None):
     return False
 
 
+def qc_enabled():
+    """RENDER_QC=1/0; on by default with the hd preset (one decode per clip)."""
+    from ffmpeg_utils import hd_preset
+    value = os.environ.get("RENDER_QC", "").strip()
+    return value == "1" if value else hd_preset()
+
+
+def clip_quality_report(served_path, clean_path, output_format, expected_duration):
+    """Run render_qc on the clip about to be announced; a summary for metadata.
+
+    The served file may be a lazy hook copy that is encoded on first request;
+    then the clean canonical file (same video, no overlay) is measured. Never
+    raises: QC reports a problem, it does not lose the clip.
+    """
+    if not qc_enabled():
+        return None
+    import render_qc
+    from ffmpeg_utils import hd_preset
+    from reframe_v2 import hd_delivery_size
+    target = served_path if served_path and os.path.isfile(served_path) else clean_path
+    if output_format == "horizontal":
+        expected = None
+    else:
+        expected = hd_delivery_size(1.0 if output_format == "square" else ASPECT_RATIO)
+    try:
+        report = render_qc.run_qc(target, expected_size=expected,
+                                  expected_duration=expected_duration, hd=hd_preset())
+    except Exception as e:  # noqa: BLE001 — a QC crash must not fail the clip
+        print(f"   ⚠️ QC could not run: {type(e).__name__}")
+        return {"status": "WARN", "checks": [
+            {"name": "qc", "status": "WARN", "detail": "quality check could not run"}]}
+    bad = [c for c in report.checks if c.status != "PASS"]
+    print(f"   🔎 QC {report.status}" + "".join(f" | {c.name}: {c.detail}" for c in bad))
+    return render_qc.read_report(target) or {"status": report.status, "checks": []}
+
+
 def mark_delivery(final_path, marker=None):
     """The free-plan copy of a finished clip to serve: ``wm_<final>`` next to it.
 
@@ -2219,7 +2255,9 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
          '-f', 'rawvideo', '-pix_fmt', 'bgr24',
          '-video_size', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
          '-framerate', str(fps), '-i', 'pipe:0',
-         *video_encode_args(QUALITY_FAST), '-an', silent_video_path],
+         # yuv420p: a bgr24 pipe into libx264 otherwise encodes High 4:4:4,
+         # which most browsers and players refuse (nvenc args carry it already).
+         *video_encode_args(QUALITY_FAST), '-pix_fmt', 'yuv420p', '-an', silent_video_path],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     reader = cv2.VideoCapture(input_video)
@@ -3578,6 +3616,10 @@ if __name__ == '__main__':
                         served = captioned or deliver_path
                         if os.environ.get("WATERMARK") == "1":
                             served = mark_delivery(served)
+                        # A pro-mode recipe drops silences: its length is its own.
+                        clip['qc'] = clip_quality_report(
+                            served, clip_final_path, output_format,
+                            None if clip.get('recipe') else end - start)
                         print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
                         # Hand the API the file to actually serve for this clip.
                         # Without it the status poller guesses the clean reframe

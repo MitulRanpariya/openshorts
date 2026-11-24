@@ -143,10 +143,93 @@ def mark_ai_generated(path, detail=""):
         return False
 
 
+# --- ClipForge render presets --------------------------------------------
+#
+# RENDER_PRESET picks the delivery profile (config: render.quality_preset):
+#   legacy (default) — the historical settings above, byte-for-byte.
+#   hd               — finished 1080x1920 deliverables for Shorts/Reels:
+#     * x264 intermediates near-lossless (CRF 14) so the 3-5 encode
+#       generations a clip goes through stop eating detail; the delivered
+#       encode at CRF 17. yuv420p + High profile always (a bgr24 pipe into
+#       libx264 otherwise produced High 4:4:4, which browsers refuse).
+#     * lanczos scaling for every scale filter of the encode (-sws_flags is an
+#       output option, so no filter graph text changes and the GPU graph
+#       reader is unaffected).
+#     * a speech chain before the loudness pass, 48 kHz AAC at 192 kb/s.
+#       Without -ar, loudnorm's 192 kHz output made AAC pick 96 kHz.
+RENDER_PRESETS = ("legacy", "hd")
+
+_X264_HD_ARGS = {
+    QUALITY: ["-c:v", "libx264", "-preset", "medium", "-crf", "17"],
+    QUALITY_FAST: ["-c:v", "libx264", "-preset", "fast", "-crf", "14"],
+    DELIVERY: ["-c:v", "libx264", "-preset", "medium", "-crf", "19"],
+    INTERMEDIATE: ["-c:v", "libx264", "-preset", "fast", "-crf", "14"],
+}
+_HD_VIDEO_EXTRA = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
+HD_SWS_FLAGS = ["-sws_flags", "lanczos+accurate_rnd+full_chroma_int"]
+
+# Speech clean-up, gentle on purpose: rumble below 70 Hz goes, broadband
+# noise is reduced by ~10 dB (afftdn's default is stronger and smears
+# consonants), and a 2.5:1 compressor evens out a guest who leans away from
+# the mic before loudnorm sets the level. SPEECH_CLEANUP=0 keeps only loudnorm.
+SPEECH_CHAIN = ("highpass=f=70,afftdn=nr=10:nf=-50:tn=1,"
+                "acompressor=threshold=-20dB:ratio=2.5:attack=15:release=250:makeup=1.5")
+HD_AUDIO_RATE = "48000"
+HD_AUDIO_BITRATE = "192k"
+# Length of the fade at each recut join: long enough to remove the click of a
+# waveform cut mid-cycle, far too short to hear as a fade.
+JOIN_FADE_SECONDS = 0.012
+
+
+def render_preset():
+    value = os.environ.get("RENDER_PRESET", "legacy").strip().lower()
+    return value if value in RENDER_PRESETS else "legacy"
+
+
+def hd_preset():
+    return render_preset() == "hd"
+
+
+def _normalize_on():
+    return os.environ.get("AUDIO_NORMALIZE", "1").strip() != "0"
+
+
+def _speech_cleanup_on():
+    return os.environ.get("SPEECH_CLEANUP", "1").strip() != "0"
+
+
+def hd_audio_filter(processed=False, fade_duration=None):
+    """The -af chain of an hd encode (None when there is nothing to do).
+
+    ``processed``: the input is a clip this pipeline already finished, so only
+    the join fades apply (running denoise/compression twice compounds them).
+    ``fade_duration``: seconds of this piece; adds the join fades.
+    """
+    parts = []
+    if not processed:
+        if _speech_cleanup_on():
+            parts.append(SPEECH_CHAIN)
+        if _normalize_on():
+            parts.append(LOUDNORM_FILTER)
+    if fade_duration and fade_duration > 4 * JOIN_FADE_SECONDS:
+        out_at = max(0.0, float(fade_duration) - JOIN_FADE_SECONDS)
+        parts.append(f"afade=t=in:d={JOIN_FADE_SECONDS}")
+        parts.append(f"afade=t=out:st={out_at:.3f}:d={JOIN_FADE_SECONDS}")
+    return ",".join(parts) or None
+
+
+def hd_audio_args(processed=False, fade_duration=None):
+    chain = hd_audio_filter(processed, fade_duration)
+    args = ["-af", chain] if chain else []
+    return args + ["-c:a", "aac", "-b:a", HD_AUDIO_BITRATE, "-ar", HD_AUDIO_RATE]
+
+
 def audio_encode_args():
     """AAC encode args for a delivered clip, with loudness normalisation."""
+    if hd_preset():
+        return hd_audio_args()
     args = ["-c:a", "aac"]
-    if os.environ.get("AUDIO_NORMALIZE", "1").strip() != "0":
+    if _normalize_on():
         args = ["-af", LOUDNORM_FILTER] + args
     return args
 
@@ -275,10 +358,13 @@ def video_encode_args(tier=QUALITY):
         print(f"🎞️ [Encoder] video encoder: {'h264_nvenc' if use_nvenc else 'libx264'} "
               f"(FFMPEG_ENCODER={mode})")
 
-    if use_nvenc and tier == INTERMEDIATE:
-        return _intermediate_nvenc_args()
+    hd = hd_preset()
     if use_nvenc:
-        return list(_NVENC_ARGS[tier])
+        args = (_intermediate_nvenc_args() if tier == INTERMEDIATE
+                else list(_NVENC_ARGS[tier]))
+        return args + HD_SWS_FLAGS if hd else args
+    if hd:
+        return _x264_with_preset(_X264_HD_ARGS[tier]) + _HD_VIDEO_EXTRA + HD_SWS_FLAGS
     return _x264_with_preset(_X264_ARGS[tier])
 
 

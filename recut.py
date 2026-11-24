@@ -25,7 +25,7 @@ import time
 import uuid
 
 from ffmpeg_utils import (METADATA_SCRUB, QUALITY_FAST, audio_encode_args,
-                          video_encode_args)
+                          hd_audio_args, hd_preset, video_encode_args)
 
 # EDL limits. Deliberately generous — the editor is for humans fixing cuts,
 # not for stitching feature films.
@@ -180,10 +180,23 @@ def virtual_transcript(transcript, segments):
     }
 
 
-def cut_commands(input_path, segments, part_paths):
+def _segment_audio_args(seg, audio_processed, joined):
+    """hd preset: one audio pass (never a second clean-up of a finished clip)
+    and short fades at the joins; legacy keeps its historical args."""
+    if not hd_preset():
+        return audio_encode_args()
+    fade = (seg["end"] - seg["start"]) if joined else None
+    return hd_audio_args(processed=audio_processed, fade_duration=fade)
+
+
+def cut_commands(input_path, segments, part_paths, audio_processed=False):
     """ffmpeg argv for each segment cut. Re-encodes for frame-accurate cuts
-    with uniform parameters so the parts concat cleanly."""
+    with uniform parameters so the parts concat cleanly.
+
+    ``audio_processed``: the input is the finished canonical clip (fast path),
+    whose audio already went through the clean-up/loudness chain."""
     commands = []
+    joined = len(segments) > 1
     for seg, part in zip(segments, part_paths):
         commands.append([
             "ffmpeg", "-y",
@@ -191,7 +204,7 @@ def cut_commands(input_path, segments, part_paths):
             "-to", str(seg["end"]),
             "-i", input_path,
             *video_encode_args(QUALITY_FAST),
-            *audio_encode_args(),
+            *_segment_audio_args(seg, audio_processed, joined),
             # Every final-artifact producer in the repo scrubs source metadata
             # and fronts the moov atom (a fast-path recut IS the delivered
             # file, and without +faststart the browser preview hangs). Also on
@@ -213,11 +226,13 @@ def concat_command(list_path, out_path):
     ]
 
 
-def run_cut_concat(input_path, segments, out_path, workdir, runner=None):
+def run_cut_concat(input_path, segments, out_path, workdir, runner=None,
+                   audio_processed=False):
     """Cut every segment from ``input_path`` and join them into ``out_path``."""
     run = runner or _run_ffmpeg
     if len(segments) == 1:
-        run(cut_commands(input_path, segments, [out_path])[0])
+        run(cut_commands(input_path, segments, [out_path],
+                         audio_processed=audio_processed)[0])
         return out_path
 
     # Unique per invocation: two concurrent recuts in the same job dir must
@@ -229,7 +244,8 @@ def run_cut_concat(input_path, segments, out_path, workdir, runner=None):
     ]
     list_path = os.path.join(workdir, f"temp_recut_concat_{token}.txt")
     try:
-        for command in cut_commands(input_path, segments, part_paths):
+        for command in cut_commands(input_path, segments, part_paths,
+                                    audio_processed=audio_processed):
             run(command)
         with open(list_path, "w") as f:
             for part in part_paths:
@@ -297,8 +313,9 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
     work_path = os.path.join(output_dir, work_name)
 
     try:
+        # Fast path (no reframe) cuts the finished canonical clip.
         run_cut_concat(input_path, segments, work_path, output_dir,
-                       runner=runner)
+                       runner=runner, audio_processed=not reframe)
 
         if reframe:
             if renderer is not None:
