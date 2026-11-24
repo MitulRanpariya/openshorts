@@ -8438,6 +8438,47 @@ async def youtube_upload(req: YouTubeUploadRequest, request: Request):
     return {"success": True, "youtube": record}
 
 
+ANALYTICS_METRICS_ALLOWED = ("averageViewPercentage", "averageViewDuration", "views",
+                             "likes", "subscribersGained", "estimatedMinutesWatched")
+
+
+@app.post("/api/youtube/analytics/refresh")
+async def youtube_analytics_refresh():
+    """Fetch current metrics for every uploaded clip (official APIs only)."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not available")
+    import youtube_analytics as yta
+    import youtube_publisher as ytp
+
+    def run():
+        with httpx.Client(timeout=60) as http:
+            return yta.refresh(OUTPUT_DIR, http)
+    try:
+        n = await asyncio.to_thread(run)
+    except ytp.YouTubeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"success": True, "clips": n}
+
+
+@app.get("/api/youtube/insights")
+async def youtube_insights(metric: str = "averageViewPercentage"):
+    """Per-feature averages over uploaded clips, with sample sizes."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not available")
+    if metric not in ANALYTICS_METRICS_ALLOWED:
+        raise HTTPException(status_code=400, detail=f"metric must be one of {ANALYTICS_METRICS_ALLOWED}")
+    import youtube_analytics as yta
+    clips = [c for _, _, c in await asyncio.to_thread(yta.uploaded_clips, OUTPUT_DIR)]
+    report = yta.observations(clips, metric)
+    report["clips"] = [{
+        "title": (c.get("youtube") or {}).get("title"),
+        "url": (c.get("youtube") or {}).get("url"),
+        "privacy": (c.get("youtube") or {}).get("privacy"),
+        "metrics": (c.get("youtube") or {}).get("metrics"),
+    } for c in clips][:200]
+    return report
+
+
 async def _clipforge_autopublish(job_id, job, only=None):
     """Delivery step: upload the best clips when youtube.auto_upload is on.
 

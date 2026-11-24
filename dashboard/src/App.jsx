@@ -3,6 +3,7 @@ import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activ
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import McpConnectCard from './components/McpConnectCard';
+import YouTubeInsightsCard from './components/YouTubeInsightsCard';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 import { clipProgress, FREE_CLIPS_PER_VIDEO, FREE_CLIPS_QUIET, MAX_CLIPS_PER_VIDEO } from './lib/clipProgress';
@@ -1839,6 +1840,7 @@ function App() {
               </div>
               {/* Self-hosted installs have no account page, so the agent
                   how-to lives here; cloud users get it (with OAuth) in Account. */}
+              {!billingEnabled && <div className="mb-6"><YouTubeInsightsCard /></div>}
               {!billingEnabled && <div className="mb-6"><McpConnectCard cloud={false} /></div>}
               {isManaged ? (
                 <div className="card p-6 mb-2">
