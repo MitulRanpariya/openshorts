@@ -125,3 +125,73 @@ def test_upload_then_package_end_to_end(job, tmp_path):
     assert final["qc"]["status"] in ("PASS", "WARN")
     assert final["recipe"]["elements"]["voiceover"] == "intro"
     assert _meta(job)["shorts"][0]["final"]["file"] == final["file"]
+
+
+# --- rights + YouTube publishing (Google mocked at youtube_publisher.upload) ---
+@pytest.fixture()
+def yt(monkeypatch, tmp_path):
+    import youtube_publisher as ytp
+    monkeypatch.setenv("CLIPFORGE_STATE_DIR", str(tmp_path / "state"))
+    for name in ("RIGHTS_DEFAULT_CATEGORY", "YOUTUBE_AUTO_UPLOAD", "GEMINI_API_KEY", "LLM_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    uploads = []
+
+    def fake_upload(path, body, http, progress=None):
+        uploads.append((path, body))
+        return {"video_id": "VID9", "privacy": body["status"]["privacyStatus"],
+                "url": "https://youtube.com/shorts/VID9", "upload_url": "secret-session"}
+    monkeypatch.setattr(ytp, "upload", fake_upload)
+    return uploads
+
+
+def test_rights_record_and_audit_log(job, yt):
+    r = _request("POST", "/api/job/rights", {"job_id": JOB_ID, "category": "cc",
+                                              "license": "CC BY 4.0", "attribution": "Show by X"})
+    assert r.status_code == 200 and r.json()["public_allowed"] is True
+    meta = _meta(job)
+    assert meta["rights"]["category"] == "cc" and len(meta["rights_log"]) == 1
+    assert _request("POST", "/api/job/rights",
+                    {"job_id": JOB_ID, "category": "mine"}).status_code == 400
+    got = _request("GET", f"/api/job/{JOB_ID}/rights").json()
+    assert got["rights"]["license"] == "CC BY 4.0"
+
+
+@needs_ffmpeg
+def test_public_upload_blocked_without_rights_private_allowed(job, yt):
+    r = _request("POST", "/api/youtube/upload", {"job_id": JOB_ID, "clip_index": 0,
+                                                  "title": "T", "privacy": "public"})
+    assert r.status_code == 400 and "rights" in r.json()["detail"]
+    assert yt == []
+    r = _request("POST", "/api/youtube/upload", {"job_id": JOB_ID, "clip_index": 0,
+                                                  "title": "T", "privacy": "private"})
+    assert r.status_code == 200, r.text
+    rec = r.json()["youtube"]
+    assert rec["video_id"] == "VID9" and "upload_url" not in rec
+    assert _meta(job)["shorts"][0]["youtube"]["video_id"] == "VID9"
+
+
+@needs_ffmpeg
+def test_upload_refuses_qc_fail_and_drafts_metadata_without_model(job, yt):
+    meta = _meta(job)
+    meta["shorts"][0]["qc"] = {"status": "FAIL", "checks": []}
+    job["meta"].write_text(json.dumps(meta))
+    r = _request("POST", "/api/youtube/upload", {"job_id": JOB_ID, "clip_index": 0})
+    assert r.status_code == 400 and "quality" in r.json()["detail"]
+    meta["shorts"][0]["qc"] = {"status": "PASS", "checks": []}
+    meta["shorts"][0]["video_title_for_youtube_short"] = "Fallback title"
+    job["meta"].write_text(json.dumps(meta))
+    r = _request("POST", "/api/youtube/upload", {"job_id": JOB_ID, "clip_index": 0})
+    assert r.status_code == 200, r.text
+    assert yt[-1][1]["snippet"]["title"] == "Fallback title"
+
+
+def test_scheduled_upload_needs_future_time(job, yt):
+    _request("POST", "/api/job/rights", {"job_id": JOB_ID, "category": "own"})
+    r = _request("POST", "/api/youtube/upload", {"job_id": JOB_ID, "clip_index": 0, "title": "T",
+                                                  "publish_at": "2001-01-01T00:00:00Z"})
+    assert r.status_code == 400
+
+
+def test_youtube_status_without_connection(yt):
+    d = _request("GET", "/api/youtube/status").json()
+    assert d["connected"] is False and d["channel"] is None

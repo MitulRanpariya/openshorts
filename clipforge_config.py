@@ -48,6 +48,23 @@ KEY_MAP: dict[str, str] = {
     "upload_post.profile": "UPLOAD_POST_PROFILE",
     # YouTube source downloads (cookies are read from a file, see FILE_KEYS)
     "youtube.download_cookies_file": "YOUTUBE_COOKIES",
+    # Direct YouTube upload (ClipForge Phase 5)
+    "youtube.oauth_client_file": "YOUTUBE_OAUTH_CLIENT_FILE",
+    "youtube.auto_upload": "YOUTUBE_AUTO_UPLOAD",
+    "youtube.privacy": "YOUTUBE_PRIVACY",
+    "youtube.schedule_times": "YOUTUBE_SCHEDULE_TIMES",
+    "youtube.timezone": "YOUTUBE_TIMEZONE",
+    "youtube.max_per_day": "YOUTUBE_MAX_PER_DAY",
+    "youtube.max_per_job": "YOUTUBE_MAX_PER_JOB",
+    "youtube.min_score": "YOUTUBE_MIN_SCORE",
+    "youtube.require_keep": "YOUTUBE_REQUIRE_KEEP",
+    "youtube.use_final": "YOUTUBE_USE_FINAL",
+    "youtube.category_id": "YOUTUBE_CATEGORY_ID",
+    "youtube.default_tags": "YOUTUBE_DEFAULT_TAGS",
+    # Default rights record for jobs that have none (your own declaration)
+    "rights.default_category": "RIGHTS_DEFAULT_CATEGORY",
+    "rights.default_license": "RIGHTS_DEFAULT_LICENSE",
+    "rights.default_attribution": "RIGHTS_DEFAULT_ATTRIBUTION",
     # S3-compatible backup
     "storage.s3.access_key_id": "AWS_ACCESS_KEY_ID",
     "storage.s3.secret_access_key": "AWS_SECRET_ACCESS_KEY",
@@ -90,9 +107,13 @@ FILE_KEYS = frozenset({"youtube.download_cookies_file"})
 # Flags the code reads as "1"/"0" rather than true/false.
 NUMERIC_FLAGS = frozenset({"SPEECH_CLEANUP", "AUDIO_NORMALIZE", "RENDER_QC",
                            "BRAND_AUTO_PACKAGE", "BRAND_AUTO_INTRO", "SOURCE_MAP",
-                           "CLIP_REFINE"})
+                           "CLIP_REFINE", "YOUTUBE_AUTO_UPLOAD", "YOUTUBE_REQUIRE_KEEP",
+                           "YOUTUBE_USE_FINAL"})
+# Keys that may be YAML lists (sent on as "a,b,c").
+LIST_KEYS = frozenset({"youtube.schedule_times", "youtube.default_tags"})
+
 # Keys whose value is a path: made absolute (relative to the config file).
-PATH_KEYS = frozenset({"branding.logo_path"})
+PATH_KEYS = frozenset({"branding.logo_path", "youtube.oauth_client_file"})
 
 # Env vars whose value is a credential: never logged or shown.
 SECRET_ENV = frozenset({
@@ -127,9 +148,14 @@ def _flatten(data: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
 
 
 def _as_env_value(dotted: str, value: Any) -> Optional[str]:
-    """A YAML scalar as the string an env var would carry; None = unset."""
+    """A YAML scalar as the string an env var would carry; None = unset.
+    A list of scalars becomes a comma-separated string."""
     if value is None or value == "":
         return None
+    if isinstance(value, list) and dotted in LIST_KEYS:
+        items = [str(v).strip() for v in value if isinstance(v, (str, int, float))
+                 and str(v).strip()]
+        return ",".join(items) or None
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float, str)):

@@ -107,7 +107,11 @@ def test_example_file_parses_and_only_uses_known_keys(caplog):
     # Only the recommended render defaults carry a value; no credential does.
     assert set(values) == {"RENDER_PRESET", "SPEECH_CLEANUP", "AUDIO_NORMALIZE", "RENDER_QC",
                            "BRAND_LOGO_CORNER", "BRAND_ACCENT_COLOR", "BRAND_AUTO_PACKAGE",
-                           "BRAND_AUTO_INTRO", "SOURCE_MAP", "CLIP_REFINE"}
+                           "BRAND_AUTO_INTRO", "SOURCE_MAP", "CLIP_REFINE",
+                           "YOUTUBE_AUTO_UPLOAD", "YOUTUBE_PRIVACY", "YOUTUBE_TIMEZONE",
+                           "YOUTUBE_MAX_PER_DAY", "YOUTUBE_MAX_PER_JOB", "YOUTUBE_MIN_SCORE",
+                           "YOUTUBE_REQUIRE_KEEP", "YOUTUBE_USE_FINAL", "YOUTUBE_CATEGORY_ID",
+                           "RIGHTS_DEFAULT_CATEGORY"}
     assert not any("KEY" in k or "SECRET" in k for k in values)
     assert "unknown key" not in caplog.text
 
@@ -145,3 +149,13 @@ def test_logo_path_is_resolved_relative_to_config(tmp_path):
     v = cc.load(p)
     assert v["BRAND_LOGO_PATH"] == str(tmp_path / "brand" / "logo.png")
     assert v["BRAND_AUTO_PACKAGE"] == "1"
+
+
+def test_youtube_lists_become_comma_separated(tmp_path):
+    p = write(tmp_path, "youtube: {schedule_times: ['18:00', '21:30'], default_tags: [podcast, habits],"
+                        " auto_upload: true, oauth_client_file: client.json}\n")
+    v = cc.load(p)
+    assert v["YOUTUBE_SCHEDULE_TIMES"] == "18:00,21:30"
+    assert v["YOUTUBE_DEFAULT_TAGS"] == "podcast,habits"
+    assert v["YOUTUBE_AUTO_UPLOAD"] == "1"
+    assert v["YOUTUBE_OAUTH_CLIENT_FILE"] == str(tmp_path / "client.json")

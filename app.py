@@ -3503,6 +3503,8 @@ _DELIVERY_STEPS = (
     # Autopilot bookkeeping + autopublish (before the clips-ready email,
     # which it replaces for its own jobs).
     ("autopilot", lambda jid, job: _autopilot_job_finished(jid, job)),
+    # ClipForge: auto-upload to the connected YouTube channel (background).
+    ("youtube", lambda jid, job: _clipforge_autopublish(jid, job)),
     # The caller's webhook (after the archive, so durable links exist).
     ("webhook", lambda jid, job: _notify_job_webhook(jid)),
     # Operational alerting (proxy out of credits / failures) and analytics.
@@ -8088,6 +8090,10 @@ async def review_clip(req: ClipReviewRequest, request: Request):
             clips[req.clip_index].pop('review', None)
         write_json_atomic(path, data, indent=2)
         _clipforge_mem_update(job, req.clip_index, review=review)
+    if review and review["decision"] in ("keep", "pin"):
+        import youtube_publisher as ytp
+        if ytp.settings()["require_keep"]:
+            await _clipforge_autopublish(req.job_id, job, only=[req.clip_index])
     return {"success": True, "review": review}
 
 
@@ -8213,6 +8219,278 @@ async def package_clip_endpoint(req: ClipPackageRequest, request: Request):
         write_json_atomic(path, data, indent=2)
         _clipforge_mem_update(job, req.clip_index, final=final)
     return {"success": True, "final": final}
+
+
+# --------------------------------------------------------------------------- #
+# ClipForge: source rights, upload metadata and direct YouTube publishing
+# --------------------------------------------------------------------------- #
+class JobRightsRequest(BaseModel):
+    job_id: str
+    category: str
+    license: Optional[str] = ""
+    attribution: Optional[str] = ""
+    evidence: Optional[str] = ""
+    notes: Optional[str] = ""
+    intended_use: Optional[str] = "monetized"
+
+
+class YouTubeMetadataRequest(BaseModel):
+    job_id: str
+    clip_index: int
+
+
+class YouTubeUploadRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    input_filename: Optional[str] = None
+    use_final: bool = True
+    title: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[List[str]] = None
+    privacy: str = "private"
+    publish_at: Optional[str] = None
+
+
+_yt_channel_cache = {"at": 0.0, "info": None}
+
+
+def _effective_rights(data):
+    """The job's own rights record, else the configured standing default."""
+    if isinstance(data.get('rights'), dict):
+        return data['rights']
+    category = os.environ.get("RIGHTS_DEFAULT_CATEGORY", "").strip()
+    if not category or category == "unclear":
+        return None
+    import youtube_publisher as ytp
+    try:
+        rights = ytp.clean_rights({
+            "category": category,
+            "license": os.environ.get("RIGHTS_DEFAULT_LICENSE", ""),
+            "attribution": os.environ.get("RIGHTS_DEFAULT_ATTRIBUTION", "")})
+    except ValueError:
+        return None
+    rights["source"] = "config default"
+    return rights
+
+
+@app.get("/api/youtube/status")
+async def youtube_status():
+    """Connection state for the dashboard; never a token."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not available")
+    import youtube_publisher as ytp
+    info = ytp.describe()
+    if info["connected"] and time.time() - _yt_channel_cache["at"] > 600:
+        def _channel():
+            with httpx.Client(timeout=20) as http:
+                return ytp.channel_info(http)
+        try:
+            _yt_channel_cache.update(at=time.time(), info=await asyncio.to_thread(_channel))
+        except Exception as e:  # noqa: BLE001
+            _yt_channel_cache.update(at=time.time(), info=None)
+            info["error"] = str(e)[:160]
+    info["channel"] = (_yt_channel_cache["info"] or {}).get("title") if info["connected"] else None
+    return info
+
+
+@app.post("/api/job/rights")
+async def set_job_rights(req: JobRightsRequest, request: Request):
+    """Record the source's rights for this job (the creator's declaration)."""
+    import youtube_publisher as ytp
+    job, output_dir = await _clipforge_job(req.job_id, request)
+    try:
+        rights = ytp.clean_rights(req.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    rights["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        path, data = _clipforge_metadata(output_dir)
+        data['rights'] = rights
+        log = data.get('rights_log') if isinstance(data.get('rights_log'), list) else []
+        log.append({"at": rights["at"], "category": rights["category"],
+                    "license": rights["license"]})
+        data['rights_log'] = log[-50:]
+        write_json_atomic(path, data, indent=2)
+    allowed, reason = ytp.rights_allow_public(rights)
+    return {"success": True, "rights": rights, "public_allowed": allowed, "reason": reason}
+
+
+@app.get("/api/job/{job_id}/rights")
+async def get_job_rights(job_id: str, request: Request):
+    import youtube_publisher as ytp
+    _job, output_dir = await _clipforge_job(job_id, request)
+    _path, data = _clipforge_metadata(output_dir)
+    rights = _effective_rights(data)
+    allowed, reason = ytp.rights_allow_public(rights)
+    return {"rights": rights, "public_allowed": allowed, "reason": reason,
+            "source_map": data.get('source_map')}
+
+
+@app.post("/api/youtube/metadata")
+async def youtube_metadata(req: YouTubeMetadataRequest, request: Request):
+    """Draft titles/description/hashtags for one clip, credit appended."""
+    import publish_metadata as pm
+    import youtube_publisher as ytp
+    _job, output_dir = await _clipforge_job(req.job_id, request)
+    _path, data = _clipforge_metadata(output_dir)
+    clips = data.get('shorts', [])
+    if not 0 <= req.clip_index < len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    api_key = await resolve_gemini(request)
+    out = await asyncio.to_thread(
+        pm.generate, clips[req.clip_index], data.get('transcript') or {},
+        data.get('source_map'), _effective_rights(data), pm.default_run_stage(api_key),
+        ytp.settings()["default_tags"])
+    return out
+
+
+def _clip_upload_file(job, output_dir, data, index, use_final, asked=None):
+    """(path, qc) of the file to upload: the packaged final when wanted."""
+    clip = data['shorts'][index]
+    final = clip.get('final') or {}
+    if use_final and final.get('file') and os.path.isfile(os.path.join(output_dir, final['file'])):
+        return os.path.join(output_dir, final['file']), final.get('qc')
+    base_name = None
+    for f in glob.glob(os.path.join(output_dir, "*_metadata.json")):
+        base_name = os.path.basename(f).replace('_metadata.json', '')
+    served = _served_clip_file(job, output_dir, base_name, clip, index, asked)
+    return os.path.join(output_dir, served), clip.get('qc')
+
+
+def _publish_one(job_id, job, index, title=None, description=None, tags=None,
+                 privacy="private", publish_at=None, use_final=True, api_key=None,
+                 asked=None):
+    """Blocking: gate, write metadata, upload, persist. Returns the record."""
+    import publish_metadata as pm
+    import youtube_publisher as ytp
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    path, data = _clipforge_metadata(output_dir)
+    clip = data['shorts'][index]
+    video_path, qc = _clip_upload_file(job, output_dir, data, index, use_final, asked)
+    if not os.path.isfile(video_path):
+        raise ytp.YouTubeError("the clip file is not on the server")
+    if (qc or {}).get("status") == "FAIL":
+        raise ytp.YouTubeError("this file failed the quality checks; fix it before uploading")
+    rights = _effective_rights(data)
+    if privacy not in ytp.PRIVACY:
+        raise ytp.YouTubeError("privacy must be private, unlisted or public")
+    if privacy == "public" or publish_at:
+        allowed, reason = ytp.rights_allow_public(rights)
+        if not allowed:
+            raise ytp.YouTubeError(reason)
+    if publish_at:
+        try:
+            when = datetime.fromisoformat(publish_at.replace("Z", "+00:00"))
+        except ValueError:
+            raise ytp.YouTubeError("publish_at must be an ISO date-time")
+        if when.tzinfo is None or when <= datetime.now(timezone.utc) + timedelta(minutes=15):
+            raise ytp.YouTubeError("publish_at must be at least 15 minutes ahead, with a timezone")
+        publish_at = when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cfg = ytp.settings()
+    if not title:
+        drafted = pm.generate(clip, data.get('transcript') or {}, data.get('source_map'),
+                              rights, pm.default_run_stage(api_key), cfg["default_tags"])
+        title = drafted["title"]
+        description = description if description is not None else drafted["description"]
+        tags = tags if tags is not None else drafted["tags"]
+    language = (data.get('transcript') or {}).get('language')
+    body = ytp.build_body(title, description or "", tags or [], privacy=privacy,
+                          publish_at=publish_at, category_id=cfg["category_id"],
+                          language=language if language and language != "none" else None)
+    with httpx.Client(timeout=120) as http:
+        record = ytp.upload(video_path, body, http)
+    public = {k: v for k, v in record.items() if k != "upload_url"}
+    duration = float(clip.get('end', 0)) - float(clip.get('start', 0))
+    warning = ytp.shorts_warning(duration, rights)
+    if warning:
+        public["warning"] = warning
+    # Persist under the metadata lock's protection of the caller.
+    path, data = _clipforge_metadata(output_dir)
+    data['shorts'][index]['youtube'] = public
+    write_json_atomic(path, data, indent=2)
+    _clipforge_mem_update(job, index, youtube=public)
+    return public
+
+
+@app.post("/api/youtube/upload")
+async def youtube_upload(req: YouTubeUploadRequest, request: Request):
+    """Upload one clip to the connected channel (private by default)."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not available")
+    import youtube_publisher as ytp
+    job, output_dir = await _clipforge_job(req.job_id, request)
+    _path, data = _clipforge_metadata(output_dir)
+    if not 0 <= req.clip_index < len(data.get('shorts', [])):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    api_key = await resolve_gemini(request)
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        try:
+            record = await asyncio.to_thread(
+                _publish_one, req.job_id, job, req.clip_index, req.title, req.description,
+                req.tags, req.privacy, req.publish_at, req.use_final, api_key,
+                req.input_filename)
+        except ytp.NotConnected as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except (ytp.YouTubeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "youtube": record}
+
+
+async def _clipforge_autopublish(job_id, job, only=None):
+    """Delivery step: upload the best clips when youtube.auto_upload is on.
+
+    Runs as a background task so a slow upload never holds the delivery.
+    Scheduled/public only with a rights record that allows it; otherwise the
+    configured private/unlisted. Errors are logged on the job, never raised.
+    """
+    if BILLING_ENABLED or job.get('status') != 'completed':
+        return
+    import youtube_publisher as ytp
+    cfg = ytp.settings()
+    if not cfg["auto_upload"] or not ytp.describe()["connected"]:
+        return
+    if cfg["require_keep"] and only is None:
+        return  # waits for the creator's keep/pin on each clip
+
+    async def run():
+        lock = _rerender_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            output_dir = os.path.join(OUTPUT_DIR, job_id)
+            try:
+                _path, data = _clipforge_metadata(output_dir)
+            except HTTPException:
+                return
+            shorts = data.get('shorts', [])
+            picks = [i for i in (only if only is not None else ytp.pick_clips(shorts, cfg))
+                     if 0 <= i < len(shorts) and not (shorts[i].get('youtube') or {}).get('video_id')]
+            rights = _effective_rights(data)
+            public_ok, _reason = ytp.rights_allow_public(rights)
+            slots = (ytp.next_slots(len(picks), cfg["schedule_times"], cfg["timezone"],
+                                    ytp.taken_slots())
+                     if public_ok and cfg["schedule_times"] else [])
+            for n, index in enumerate(picks):
+                publish_at = slots[n] if n < len(slots) else None
+                privacy = cfg["privacy"]
+                if privacy == "public" and not public_ok:
+                    privacy = "private"
+                try:
+                    record = await asyncio.to_thread(
+                        _publish_one, job_id, job, index, None, None, None,
+                        privacy, publish_at, cfg["use_final"], os.environ.get("GEMINI_API_KEY"))
+                    if publish_at:
+                        ytp.reserve_slot(publish_at)
+                    job.setdefault('logs', []).append(
+                        f"📺 YouTube: clip {index + 1} uploaded ({record.get('privacy')}"
+                        f"{', publishes ' + publish_at if publish_at else ''}) {record.get('url', '')}")
+                except Exception as e:  # noqa: BLE001
+                    job.setdefault('logs', []).append(
+                        f"⚠️ YouTube: clip {index + 1} not uploaded: {str(e)[:200]}")
+                    if "limit" in str(e) or "quota" in str(e):
+                        break
+
+    asyncio.create_task(run())
 
 
 class ClipModeRequest(BaseModel):

@@ -42,6 +42,7 @@ def env(tmp_path, monkeypatch):
     for attr, name in (("_settle_reservation", "settle"), ("_archive_managed_job", "archive"),
                        ("_unmark_if_owner_paid", "unmark"),
                        ("_autopilot_job_finished", "autopilot"),
+                       ("_clipforge_autopublish", "youtube"),
                        ("_notify_job_webhook", "webhook"), ("_record_job_alert", "alert"),
                        ("_track_proxy_usage", "proxy"), ("_notify_clips_ready", "email"),
                        ("_notify_clip_activity", "activity")):

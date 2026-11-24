@@ -37,6 +37,27 @@ youtube:
   # Netscape-format cookies.txt for downloading sources you are allowed to use
   # (path relative to this file or absolute). Its contents go to YOUTUBE_COOKIES.
   download_cookies_file: ""
+  # --- Direct upload to your channel (see docs/clipforge/USER_GUIDE.md) ---
+  oauth_client_file: ""    # Google Cloud OAuth client JSON (type "Desktop app")
+  auto_upload: false       # true = upload the best clips when a job finishes
+  privacy: private         # private | unlisted | public (public needs a rights record)
+  schedule_times: []       # e.g. ["18:00", "21:00"]: scheduled publishing slots
+  timezone: Asia/Kolkata   # for schedule_times
+  max_per_day: 6           # API quota guard (~1,600 of 10,000 units per upload)
+  max_per_job: 3           # auto-upload at most this many clips per video
+  min_score: 60            # auto-upload only clips scoring at least this
+  require_keep: false      # true = auto-upload only clips you marked keep/pin
+  use_final: true          # upload the packaged final_ file when one exists
+  category_id: "22"        # 22 People & Blogs, 27 Education, 24 Entertainment
+  default_tags: []         # added to every upload, e.g. ["podcast"]
+
+rights:
+  # Your standing declaration for jobs without their own rights record
+  # (dashboard: "source rights"). own | licensed | cc | public_domain | unclear.
+  # Unclear sources only ever upload as private/unlisted.
+  default_category: unclear
+  default_license: ""      # e.g. "CC BY 4.0"
+  default_attribution: ""  # e.g. "Source: <show> by <creator> (link)"
 
 storage:
   s3:                      # optional clip backup (S3 / R2 / MinIO)

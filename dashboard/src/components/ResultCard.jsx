@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Share2, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Sparkles, Gift, ThumbsUp, ThumbsDown, Pin } from 'lucide-react';
+import { Download, Share2, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Sparkles, Gift, ThumbsUp, ThumbsDown, Pin, Youtube } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch, QuotaError, openQuotaWall } from '../lib/api';
 import { platformOptions as buildPlatformOptions, defaultPlatformFlags, flagsFromList } from '../lib/socialPlatforms';
@@ -8,6 +8,7 @@ import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import FinishShortModal from './FinishShortModal';
+import YouTubePublishModal from './YouTubePublishModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
@@ -94,7 +95,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const [showWatermarkModal, setShowWatermarkModal] = useState(false);
-    const { plan } = useAuth();
+    const { plan, billingEnabled } = useAuth();
     const videoRef = React.useRef(null);
     // Pristine base clip (no burned subtitles/hook), stable regardless of how
     // clip.video_url mutates after server edits. Used as the compositing base
@@ -216,6 +217,8 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const [showFinish, setShowFinish] = useState(false);
     const [finalShort, setFinalShort] = useState(clip.final || null);
     const [reviewBusy, setReviewBusy] = useState(false);
+    const [showYouTube, setShowYouTube] = useState(false);
+    const [ytRecord, setYtRecord] = useState(clip.youtube || null);
     const setDecision = async (decision) => {
         const next = review?.decision === decision ? 'none' : decision;
         setReviewBusy(true);
@@ -1234,6 +1237,17 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         {isTranslating ? 'translating…' : 'dub voice'}
                     </button>
 
+                    {!billingEnabled && (
+                        <button
+                            onClick={() => setShowYouTube(true)}
+                            className={QUIET_BTN}
+                            title="Upload to your own YouTube channel (private by default)"
+                        >
+                            <Youtube size={16} className={`${ytRecord?.video_id ? 'text-ok' : 'text-muted'} group-hover:text-brass transition-colors shrink-0`} />
+                            {ytRecord?.video_id ? 'on youtube' : 'youtube'}
+                        </button>
+                    )}
+
                     <button
                         onClick={() => setShowFinish(true)}
                         className={QUIET_BTN}
@@ -1442,6 +1456,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 clipIndex={index}
                 existingHook={activeLayers.hook}
             />
+
+            {showYouTube && (
+                <YouTubePublishModal
+                    isOpen={showYouTube}
+                    onClose={() => setShowYouTube(false)}
+                    jobId={jobId}
+                    clipIndex={index}
+                    clip={{ ...clip, final: finalShort, youtube: ytRecord }}
+                    inputFilename={serverVideoFile}
+                    onUploaded={setYtRecord}
+                />
+            )}
 
             {showFinish && (
                 <FinishShortModal
