@@ -39,6 +39,7 @@ import hook_grounding
 import layout_picker
 import llm_backend
 import clip_boundaries
+import source_map
 import yt_account
 import twitch_signals
 from clip_selection import (build_transcript_windows, clip_count_targets,
@@ -2784,6 +2785,18 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         print(f"   Built {len(windows)} scoring window(s).")
         costs = []
 
+        # Whole-episode map first: summary, topics, Q&A. Context for both
+        # passes and a topic label per clip; optional (None on any failure).
+        all_sentences = clip_boundaries.sentences(words)
+        smap, smap_cost = source_map.build(
+            all_sentences, video_duration, language,
+            lambda prompt, schema: _run_gemini_stage(client, model_name, prompt, schema))
+        if smap_cost:
+            costs.append(smap_cost)
+        if smap:
+            print(f"   🗺️ Source map: {len(smap['topics'])} topic(s), {len(smap['qa'])} Q&A.")
+        context = source_map.prompt_context(smap)
+
         # --- Pass 1: score windows in batches, keep the highest-scoring ---
         scored = []
         # Local models usually run with a 4-8k context (Ollama defaults to
@@ -2800,21 +2813,21 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         if heat:
             print(f"   👀 Viewer clips fall in {len(heat)} window(s).")
 
-        all_sentences = clip_boundaries.sentences(words) if clip_refine_enabled() else []
+        timed_sentences = all_sentences if clip_refine_enabled() else []
 
         def _timed_sentences(w):
             # The detail pass used to see each window as one block of prose and
             # had to guess where inside it a sentence starts. [start, text]
             # pairs (0.1 s) let it pick real boundaries; the end of a clip is
             # the start of the sentence after its last one.
-            return [[round(x["start"], 1), x["text"]] for x in all_sentences
+            return [[round(x["start"], 1), x["text"]] for x in timed_sentences
                     if x["start"] >= w["start"] - 0.05 and x["end"] <= w["end"] + 0.05]
 
         def _payload(ws, timed=False):
             out = []
             for w in ws:
                 item = {"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]}
-                if timed and all_sentences:
+                if timed and timed_sentences:
                     del item["text"]
                     item["sentences"] = _timed_sentences(w)
                 h = heat.get(w["id"])
@@ -2826,7 +2839,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             return out
 
         def _score_prompt(ws):
-            return gemini_worker.SCORE_PROMPT_TEMPLATE.format(
+            return context + gemini_worker.SCORE_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
                 windows_json=json.dumps(_payload(ws), ensure_ascii=False))
 
@@ -2865,7 +2878,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             # A split batch keeps the full clip-count band: a short list can
             # still hold the best clips, and the model returns fewer anyway.
             def build(ws):
-                return gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
+                return context + gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
                     video_duration=video_duration, language=language,
                     min_clips=lo, max_clips=hi,
                     min_secs=min_secs, max_secs=max_secs,
@@ -2966,7 +2979,13 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             print("⚠️ 2-pass returned no clips.")
             return None
 
+        for s_ in shorts:
+            topic = source_map.topic_for(s_["start"], s_["end"], smap)
+            if topic:
+                s_["topic"] = topic
         result = {"shorts": shorts}
+        if smap:
+            result["source_map"] = smap
         if cost_analysis:
             result["cost_analysis"] = cost_analysis
         return result

@@ -24,6 +24,14 @@ DURATION = re.compile(r"Each clip must be ([\d.]+) to ([\d.]+) seconds")
 
 
 def answer(prompt: str, schema_name: str) -> dict:
+    if "sourcemap" in schema_name:
+        marks = [float(x) for x in re.findall(r"^\[(\d+)\]", prompt, re.M)] or [0.0]
+        end = max(marks) + 5
+        half = round(end / 2, 1)
+        return {"summary": "Stub summary of the episode.", "participants": ["host"],
+                "topics": [{"start": 0, "end": half, "title": "First topic", "summary": "-"},
+                           {"start": half, "end": end, "title": "Second topic", "summary": "-"}],
+                "qa": []}
     windows = [(i, float(s), float(e)) for i, s, e in WINDOW.findall(prompt)]
     if "score" in schema_name:
         return {"windows": [
