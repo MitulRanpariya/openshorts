@@ -425,3 +425,34 @@ def test_vision_segments_are_capped_but_still_span_the_whole_source():
 def test_vision_segments_single_budget_watches_the_opening():
     # A one-stretch budget can only see `seg` of a long source: take the start.
     assert vision_segments(8 * 3600, 2400, 1) == [(0.0, 2400.0)]
+
+
+# --- ClipForge: score dimensions --------------------------------------------
+def test_score_breakdown_blends_into_predicted_score():
+    from clip_selection import apply_score_breakdown, SCORE_DIMENSIONS
+    clip = {"predicted_score": 90, "hook": 4, "stands_alone": 3, "payoff": 2,
+            "value": 5, "emotion": 6, "ending": 3}
+    apply_score_breakdown(clip)
+    assert set(clip["score_breakdown"]) == set(SCORE_DIMENSIONS)
+    assert not any(k in clip for k in SCORE_DIMENSIONS)          # moved, not duplicated
+    assert clip["predicted_score_model"] == 90
+    assert clip["predicted_score"] == round((90 + clip["editorial_score"]) / 2)
+    assert clip["predicted_score"] < 90                          # inflated number pulled down
+
+
+def test_score_breakdown_absent_or_garbage_is_ignored():
+    from clip_selection import apply_score_breakdown
+    clip = {"predicted_score": 70, "hook": 0, "payoff": 0}
+    assert apply_score_breakdown(clip) == {"predicted_score": 70}
+    clip = {"predicted_score": 70, "hook": "x", "payoff": 99}
+    apply_score_breakdown(clip)
+    assert clip["score_breakdown"]["payoff"] == 10 and clip["score_breakdown"]["hook"] == 0
+
+
+def test_detail_schema_accepts_clips_without_dimensions():
+    import gemini_worker
+    clip = gemini_worker.DetailClipModel.model_validate({
+        "start": 1, "end": 20, "source_window_id": "window_001", "predicted_score": 50,
+        "video_description_for_tiktok": "", "video_description_for_instagram": "",
+        "video_title_for_youtube_short": "", "viral_hook_text": ""})
+    assert clip.hook == 0 and clip.ending == 0

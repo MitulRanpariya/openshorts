@@ -517,3 +517,49 @@ def snap_clip_to_words(start, end, words, video_duration,
     if new_end <= new_start or new_end - new_start < min_duration:
         return original
     return (round(new_start, 3), round(new_end, 3))
+
+
+# --- ClipForge: explainable score dimensions --------------------------------
+# Weights of the detail pass's 0-10 dimensions in the editorial score. They are
+# a starting point to tune against human review (tools/clip_benchmark.py), not
+# a claim about what goes viral.
+SCORE_DIMENSIONS = {
+    "hook": 0.22, "stands_alone": 0.22, "payoff": 0.20,
+    "value": 0.14, "emotion": 0.10, "ending": 0.12,
+}
+
+
+def score_breakdown(clip):
+    """{dimension: 0-10} from a detail-pass clip, or None when not given."""
+    out = {}
+    for name in SCORE_DIMENSIONS:
+        try:
+            out[name] = max(0, min(10, int(clip.get(name) or 0)))
+        except (TypeError, ValueError):
+            out[name] = 0
+    return out if any(out.values()) else None
+
+
+def apply_score_breakdown(clip):
+    """Move the dimensions into ``score_breakdown`` and blend the ranking score.
+
+    ``predicted_score`` becomes the mean of the model's own 0-100 estimate and
+    the weighted dimensions (x10), so one inflated number cannot outrank a clip
+    that is solid on every axis. The model's estimate stays in
+    ``predicted_score_model``. Clips without dimensions are left as they are.
+    """
+    breakdown = score_breakdown(clip)
+    for name in SCORE_DIMENSIONS:
+        clip.pop(name, None)
+    if not breakdown:
+        return clip
+    editorial = sum(breakdown[k] * w for k, w in SCORE_DIMENSIONS.items()) * 10
+    try:
+        model = int(clip.get("predicted_score") or 0)
+    except (TypeError, ValueError):
+        model = 0
+    clip["score_breakdown"] = breakdown
+    clip["editorial_score"] = round(editorial)
+    clip.setdefault("predicted_score_model", model)
+    clip["predicted_score"] = int(round((model + editorial) / 2))
+    return clip

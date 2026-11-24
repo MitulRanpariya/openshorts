@@ -45,7 +45,9 @@ def answer(prompt: str, schema_name: str) -> dict:
             "video_description_for_tiktok": "Stub clip #test",
             "video_description_for_instagram": "Stub clip #test",
             "video_title_for_youtube_short": f"Stub moment {n + 1}",
-            "viral_hook_text": "Wait for this part", "why": "stub selection"})
+            "viral_hook_text": "Wait for this part", "why": "stub selection",
+            "hook": 7, "stands_alone": 8, "payoff": 6, "value": 6, "emotion": 4,
+            "ending": 8})
     return {"shorts": shorts}
 
 

@@ -60,6 +60,20 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
+// ClipForge editorial score dimensions (0-10, from the detail pass).
+const SCORE_LABELS = {
+    hook: 'hook', stands_alone: 'stands alone', payoff: 'payoff',
+    value: 'value', emotion: 'emotion', ending: 'ending',
+};
+// Fixed text per known flag: the flag names come from the job's metadata
+// (data), so unknown values are never rendered.
+const CONTEXT_FLAG_TEXT = {
+    starts_mid_thought: 'may start mid-thought',
+    starts_mid_sentence: 'starts mid-sentence',
+    ends_mid_sentence: 'ends mid-sentence',
+    ends_on_question: 'ends on a question',
+};
+
 export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, serverUploadPost = false, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, onModeChanged = null, onUpgrade = null }) {
     const [showModal, setShowModal] = useState(false);
     // The "why" line is clamped to two lines so cards in a row stay level;
@@ -991,6 +1005,25 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                                     {clip.why}
                                 </div>
                             )}
+                        </div>
+                    )}
+                    {/* ClipForge: why the score is what it is, and what to check
+                        before publishing (context flags from clip_boundaries). */}
+                    {clip.score_breakdown && typeof clip.score_breakdown === 'object' && (
+                        <p className="text-micro font-mono text-muted mb-1.5 break-words" aria-label="score breakdown, each out of 10">
+                            {Object.entries(SCORE_LABELS)
+                                .filter(([k]) => Number.isFinite(clip.score_breakdown[k]))
+                                .map(([k, label]) => `${label} ${clip.score_breakdown[k]}`)
+                                .join(' · ')}
+                        </p>
+                    )}
+                    {Array.isArray(clip.context_flags) && clip.context_flags.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mb-2">
+                            {clip.context_flags.filter((f) => CONTEXT_FLAG_TEXT[f]).map((f) => (
+                                <span key={f} className="text-micro bg-paper3 text-brass px-2 py-0.5 rounded-full">
+                                    {CONTEXT_FLAG_TEXT[f]}
+                                </span>
+                            ))}
                         </div>
                     )}
                     <div className="flex flex-wrap gap-1.5">

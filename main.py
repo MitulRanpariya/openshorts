@@ -46,6 +46,7 @@ from clip_selection import (build_transcript_windows, clip_count_targets,
                             detail_plan, vision_targets,
                             score_batches, shortlist_target,
                             snap_clip_to_words, trim_to_best,
+                            apply_score_breakdown,
                             vision_segments)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, cut_clip, QUALITY,
                           QUALITY_FAST, METADATA_SCRUB)
@@ -2901,6 +2902,10 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
                                     key=lambda s: float(s.get("start") or 0))
                     print(f"   Recovered {len(extra)} clip(s) from them.")
 
+        # Explainable dimensions (when the model gave them) blend into the
+        # ranking score before anything is trimmed by it.
+        for s_ in shorts:
+            apply_score_breakdown(s_)
         if len(shorts) > max_clips:
             # By score, never by position: the results arrive in transcript
             # order, so slicing kept the earliest clips and silently dropped
