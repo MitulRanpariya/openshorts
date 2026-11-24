@@ -9,6 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # variable, so this must be set here — before any test module imports app — or
 # the suite's behavior would depend on the developer's personal .env.
 os.environ["BILLING_ENABLED"] = "0"
+# Never read the developer's real clipforge.config.yaml (it holds credentials).
+os.environ["CLIPFORGE_CONFIG"] = os.devnull + ".clipforge-tests-none"
 
 # The shared YouTube-account state (yt_account) lives in files: give the suite
 # its own directory and no pacing delay, so a test never waits on, or leaves a

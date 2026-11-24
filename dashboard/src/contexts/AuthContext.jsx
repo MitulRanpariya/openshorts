@@ -224,6 +224,9 @@ export function AuthProvider({ children }) {
   const value = {
     billingEnabled: config.billingEnabled,
     localLlm: config.localLlm || null,
+    // Self-host: booleans for the credentials the server already holds
+    // (clipforge.config.yaml / env), so the UI stops asking for them.
+    serverKeys: config.serverKeys || null,
     googleAuthEnabled: config.googleAuthEnabled,
     jobRetentionSeconds: config.jobRetentionSeconds || null,
     loading,

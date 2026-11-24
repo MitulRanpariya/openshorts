@@ -1,0 +1,66 @@
+# ClipForge config — copy to clipforge.config.yaml (git-ignored) and fill in.
+#
+#   cp clipforge.config.example.yaml clipforge.config.yaml
+#
+# Every key is optional; leave a value empty to skip it. A real environment
+# variable (or .env) with the same meaning always wins over this file. Another
+# location can be chosen with CLIPFORGE_CONFIG=/path/to/file.yaml.
+#
+# Keys set here are used by the server for the dashboard, the CLI and MCP, so
+# nothing has to be pasted into the browser. Never commit the filled-in copy.
+
+llm:
+  gemini:
+    api_key: ""            # https://aistudio.google.com/app/apikey  -> GEMINI_API_KEY
+    model: ""              # default gemini-3.1-flash-lite            -> GEMINI_MODEL
+  # Optional: run the moment picker on any OpenAI-compatible server
+  # (OpenAI, OpenRouter, Ollama, LM Studio, vLLM). Frame-based stages still use Gemini.
+  openai_compatible:
+    base_url: ""           # e.g. https://api.openai.com/v1 or http://localhost:11434/v1
+    model: ""              # e.g. gpt-4.1-mini, qwen2.5:14b
+    api_key: ""
+    timeout_seconds:       # default 600
+    score_batch:           # windows per scoring call (default 3 local, 8 Gemini)
+  provider: ""             # force "gemini" to ignore base_url; empty = auto
+
+elevenlabs:
+  api_key: ""              # voice dubbing / TTS                     -> ELEVENLABS_API_KEY
+
+fal:
+  api_key: ""              # AI Shorts (actors, lip-sync)            -> FAL_KEY
+
+upload_post:
+  api_key: ""              # https://app.upload-post.com/api-keys    -> UPLOAD_POST_API_KEY
+  profile: ""              # Upload-Post profile username to post as -> UPLOAD_POST_PROFILE
+
+youtube:
+  # Netscape-format cookies.txt for downloading sources you are allowed to use
+  # (path relative to this file or absolute). Its contents go to YOUTUBE_COOKIES.
+  download_cookies_file: ""
+
+storage:
+  s3:                      # optional clip backup (S3 / R2 / MinIO)
+    access_key_id: ""
+    secret_access_key: ""
+    region: ""
+    bucket: ""
+    public_bucket: ""
+
+transcription:
+  backend: ""              # whisper (default) | parakeet (GPU)
+  whisper_model: ""        # small (default) | medium | large-v3-turbo (best captions)
+  whisper_device: ""       # cpu | cuda
+  whisper_compute: ""      # int8 (CPU) | float16 (GPU)
+
+processing:
+  max_concurrent_jobs:     # CPU-only laptop: 1
+  clip_workers:            # clips rendered in parallel per job; CPU-only: 2
+  ffmpeg_encoder: ""       # x264 (default) | nvenc | auto
+  job_retention_seconds:   # self-host default 86400 (24 h); 2592000 = 30 days
+
+clips:
+  min_seconds:             # default 15
+  max_seconds:             # default 60 (YouTube Shorts allow up to 180)
+
+# Any other environment variable the app reads, verbatim (UPPER_CASE names).
+env: {}

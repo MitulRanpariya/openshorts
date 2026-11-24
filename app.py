@@ -1,4 +1,13 @@
 import os
+
+# ClipForge: the single config file (clipforge.config.yaml) fills env vars that
+# neither the real environment nor .env set. It runs before every other import
+# because several modules read their settings at import time.
+from dotenv import load_dotenv as _early_load_dotenv
+_early_load_dotenv()
+import clipforge_config
+clipforge_config.apply()
+
 import llm_backend
 import re
 import sys
@@ -210,6 +219,21 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     return os.environ.get("GEMINI_API_KEY")
 
 
+def byok_key(header_value: Optional[str], env_name: str) -> Optional[str]:
+    """A provider key sent by the client, else (self-host only) the server's own.
+
+    Self-host keeps every credential in one place (clipforge.config.yaml / env),
+    so the dashboard, CLI and MCP work without pasting keys in the browser. A
+    header still wins. Cloud never falls back: those keys belong to the
+    operator, not to whoever calls the endpoint.
+    """
+    if header_value:
+        return header_value
+    if BILLING_ENABLED:
+        return None
+    return os.environ.get(env_name) or None
+
+
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
     """Resolve the Upload-Post key and the profile to post as.
 
@@ -252,7 +276,7 @@ def resolve_post_profile(forced_profile: Optional[str], client_profile: Optional
         return forced_profile
     # Self-host: no user model, the caller owns the Upload-Post account whose
     # key resolved above, so it picks its own profile.
-    profile = forced_profile or client_profile
+    profile = forced_profile or client_profile or os.environ.get("UPLOAD_POST_PROFILE")
     if not profile:
         raise HTTPException(status_code=400, detail="Missing Upload-Post user profile")
     return profile
@@ -5799,6 +5823,9 @@ async def get_config(response: Response):
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
+        # Self-host only: which credentials the server already holds (booleans,
+        # never the values), so the dashboard stops asking for them.
+        "serverKeys": None if BILLING_ENABLED else clipforge_config.describe(),
     }
 
 async def _probe_youtube_quality(url: str) -> dict:
@@ -9225,6 +9252,7 @@ async def translate_clip(
     x_elevenlabs_key: Optional[str] = Header(None, alias="X-ElevenLabs-Key")
 ):
     """Translate a video clip to a different language using ElevenLabs dubbing."""
+    x_elevenlabs_key = byok_key(x_elevenlabs_key, "ELEVENLABS_API_KEY")
     if not x_elevenlabs_key:
         raise HTTPException(status_code=400, detail="Missing X-ElevenLabs-Key header")
 
@@ -10939,7 +10967,7 @@ async def saasshorts_actor_options(
 ):
     """Generate multiple actor image options for the user to choose from."""
     await require_managed_entitlement(request)
-    fal_key = x_fal_key
+    fal_key = byok_key(x_fal_key, "FAL_KEY")
     if not fal_key:
         raise HTTPException(status_code=400, detail="Missing fal.ai API Key")
 
@@ -11365,8 +11393,8 @@ async def saasshorts_generate(
 ):
     """Generate a SaaS UGC video from a script. Returns a job_id for polling."""
     await require_managed_entitlement(request)
-    fal_key = x_fal_key
-    elevenlabs_key = x_elevenlabs_key
+    fal_key = byok_key(x_fal_key, "FAL_KEY")
+    elevenlabs_key = byok_key(x_elevenlabs_key, "ELEVENLABS_API_KEY")
 
     if not fal_key:
         raise HTTPException(status_code=400, detail="Missing fal.ai API Key (X-Fal-Key header)")
@@ -11572,6 +11600,7 @@ async def saasshorts_voices(
     x_elevenlabs_key: Optional[str] = Header(None, alias="X-ElevenLabs-Key"),
 ):
     """List available ElevenLabs voices."""
+    x_elevenlabs_key = byok_key(x_elevenlabs_key, "ELEVENLABS_API_KEY")
     if x_elevenlabs_key:
         try:
             loop = asyncio.get_event_loop()

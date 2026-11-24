@@ -287,7 +287,7 @@ const pollJob = async (jobId) => {
 
 function App() {
   // Cloud auth/billing session (inert when billing is disabled).
-  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm, loading: authLoading } = useAuth();
+  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm, serverKeys, loading: authLoading } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showTopUp, setShowTopUp] = useState(false);
   // Free plan: "want the watermark off?" once per job, when the clips land.
@@ -328,6 +328,7 @@ function App() {
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   // Social API State - Load encrypted or plain
+  const serverUploadPost = !billingEnabled && !!serverKeys?.uploadPost;
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
     if (stored) return decrypt(stored);
@@ -852,11 +853,11 @@ function App() {
   }, [falKey]);
 
   useEffect(() => {
-    if ((uploadPostKey || isManaged) && userProfiles.length === 0) {
+    if ((uploadPostKey || isManaged || serverUploadPost) && userProfiles.length === 0) {
       fetchUserProfiles({ silent: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uploadPostKey, isManaged]);
+  }, [uploadPostKey, isManaged, serverUploadPost]);
 
   // For managed users, fetch the durable R2 URLs of the current job's clips. The
   // preview player prefers them (free egress, edge-served, and not competing with
@@ -993,7 +994,7 @@ function App() {
   // silent: background auto-fetch — never alert(), just log. Managed users need
   // no local key (the server resolves its own); BYOK sends the header.
   const fetchUserProfiles = async ({ silent = false } = {}) => {
-    if (!uploadPostKey && !isManaged) return;
+    if (!uploadPostKey && !isManaged && !serverUploadPost) return;
     try {
       const res = await apiFetch('/api/social/user', {
         headers: uploadPostKey ? { 'X-Upload-Post-Key': uploadPostKey } : {}
@@ -1019,8 +1020,10 @@ function App() {
   // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
   // A self-hosted server running the moment picker on a local LLM
   // (LLM_BASE_URL) does not need a Gemini key for the core pipeline.
-  const geminiOk = !!apiKey || !!localLlm;
-  const keysMissing = !billingEnabled && (!geminiOk || !uploadPostKey);
+  // A key already held by the server (ClipForge config file / env) counts too.
+  // Upload-Post is only needed to post, never to clip, so it no longer blocks.
+  const geminiOk = !!apiKey || !!localLlm || !!serverKeys?.gemini;
+  const keysMissing = !billingEnabled && !geminiOk;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: Clip Generator tutorial (AuthContext set os_show_clip_tutorial
@@ -1744,11 +1747,7 @@ function App() {
               >
                 <AlertTriangle size={12} />
                 <span className="hidden md:inline">
-                  {!geminiOk && !uploadPostKey
-                    ? 'Gemini & Upload-Post keys missing'
-                    : !geminiOk
-                      ? 'Gemini API Key Missing'
-                      : 'Upload-Post API Key Missing'}
+                  Gemini API Key Missing
                 </span>
                 <span className="md:hidden">keys missing</span>
               </button>
@@ -1764,11 +1763,7 @@ function App() {
               <div className="min-w-0">
                 <span className="font-medium text-ink">Required API keys missing.</span>{' '}
                 <span className="text-muted">
-                  {!geminiOk && !uploadPostKey
-                    ? 'Set your Gemini and Upload-Post API keys to use OpenShorts.'
-                    : !geminiOk
-                      ? 'Set your Gemini API key to use OpenShorts.'
-                      : 'Set your Upload-Post API key to use OpenShorts.'}
+                  Set your Gemini API key (Settings, or llm.gemini.api_key in clipforge.config.yaml).
                 </span>
               </div>
             </div>
@@ -2655,6 +2650,7 @@ function App() {
                           onStateChange={handleClipStateChange}
                           durable={durableClips[i]}
                           uploadPostKey={uploadPostKey}
+                          serverUploadPost={serverUploadPost}
                           uploadUserId={uploadUserId}
                           geminiApiKey={apiKey}
                           elevenLabsKey={elevenLabsKey}
@@ -2705,11 +2701,7 @@ function App() {
         isOpen={showKeyModal}
         onClose={() => setShowKeyModal(false)}
         eyebrow="SETUP"
-        title={!geminiOk && !uploadPostKey
-          ? 'Required API Keys Missing'
-          : !geminiOk
-            ? 'Gemini API Key Required'
-            : 'Upload-Post API Key Required'}
+        title="Gemini API Key Required"
         footer={
           <div className="flex gap-3">
             <button
