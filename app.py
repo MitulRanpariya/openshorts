@@ -7997,6 +7997,224 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
 # clip's current clean file, so the layers above it (hook, captions, the free
 # plan's mark) are put back exactly as the other derivations put them back.
 
+# --------------------------------------------------------------------------- #
+# ClipForge: review decisions, creator assets and finished-short packaging
+# --------------------------------------------------------------------------- #
+REVIEW_DECISIONS = ("keep", "reject", "pin", "none")
+ASSET_RULES = {
+    # kind: (allowed extensions, max bytes)
+    "voiceover": ((".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".webm", ".opus"),
+                  60 * 1024 * 1024),
+    "logo": ((".png", ".jpg", ".jpeg", ".webp"), 8 * 1024 * 1024),
+}
+ASSET_NAME_RE = re.compile(r"^asset_(voiceover|logo)_[0-9a-f]{32}\.[a-z0-9]{2,5}$")
+MAX_VOICEOVER_SECONDS = 300
+
+
+class ClipReviewRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    decision: str
+    note: Optional[str] = None
+
+
+class ClipPackageRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    input_filename: Optional[str] = None
+    intro_title: str = ""
+    intro_context: str = ""
+    intro_seconds: float = 2.0
+    outro_text: Optional[str] = None       # None = the configured brand outro
+    outro_seconds: float = 2.5
+    credit_text: Optional[str] = None      # None = the configured brand credit
+    logo_asset: Optional[str] = None
+    use_brand_logo: bool = True
+    logo_corner: Optional[str] = None
+    voiceover_asset: Optional[str] = None
+    voiceover_mode: str = "intro"
+    voiceover_offset: float = 0.0
+    voiceover_gain_db: float = 0.0
+    duck_source: bool = True
+
+
+async def _clipforge_job(job_id, request):
+    """The completed job and its output dir, after the usual owner checks."""
+    await _ensure_job_files(job_id, request)
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[job_id]
+    await _assert_job_owner(request, job)
+    if job.get('status') != 'completed':
+        raise HTTPException(status_code=409,
+                            detail="This video is still processing; try again when it is done.")
+    return job, os.path.join(OUTPUT_DIR, job_id)
+
+
+def _clipforge_metadata(output_dir):
+    files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    with open(files[0], 'r') as f:
+        return files[0], json.load(f)
+
+
+def _clipforge_mem_update(job, index, **fields):
+    mem = (job.get('result') or {}).get('clips') or []
+    if 0 <= index < len(mem):
+        mem[index].update(fields)
+
+
+@app.post("/api/clip/review")
+async def review_clip(req: ClipReviewRequest, request: Request):
+    """Keep / reject / pin a clip, with an optional note. Persists in metadata."""
+    if req.decision not in REVIEW_DECISIONS:
+        raise HTTPException(status_code=400, detail=f"decision must be one of {REVIEW_DECISIONS}")
+    job, output_dir = await _clipforge_job(req.job_id, request)
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        path, data = _clipforge_metadata(output_dir)
+        clips = data.get('shorts', [])
+        if not 0 <= req.clip_index < len(clips):
+            raise HTTPException(status_code=404, detail="Clip not found")
+        review = None if req.decision == "none" else {
+            "decision": req.decision,
+            "note": (req.note or "").strip()[:500],
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        if review:
+            clips[req.clip_index]['review'] = review
+        else:
+            clips[req.clip_index].pop('review', None)
+        write_json_atomic(path, data, indent=2)
+        _clipforge_mem_update(job, req.clip_index, review=review)
+    return {"success": True, "review": review}
+
+
+@app.post("/api/clip/asset")
+async def upload_clip_asset(request: Request, job_id: str = Form(...), kind: str = Form(...),
+                            file: UploadFile = File(...)):
+    """Upload the creator's own voiceover or logo for a job's clips."""
+    if kind not in ASSET_RULES:
+        raise HTTPException(status_code=400, detail="kind must be 'voiceover' or 'logo'")
+    _job, output_dir = await _clipforge_job(job_id, request)
+    exts, max_bytes = ASSET_RULES[kind]
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in exts:
+        raise HTTPException(status_code=400, detail=f"{kind} must be one of {', '.join(exts)}")
+    name = f"asset_{kind}_{uuid.uuid4().hex}{ext}"
+    dest = os.path.join(output_dir, name)
+    size = 0
+    with open(dest, "wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > max_bytes:
+                out.close()
+                os.remove(dest)
+                raise HTTPException(status_code=413, detail="file too large")
+            out.write(chunk)
+    info = {}
+    try:
+        if kind == "logo":
+            from PIL import Image
+            with Image.open(dest) as im:
+                im.verify()
+            with Image.open(dest) as im:
+                info = {"width": im.width, "height": im.height}
+        else:
+            import short_packager as _pk
+            facts = await asyncio.to_thread(_pk.probe, dest)
+            if not facts.get("has_audio") or not 0.3 <= facts["duration"] <= MAX_VOICEOVER_SECONDS:
+                raise ValueError("needs an audio track of 0.3 s to 5 min")
+            info = {"duration": round(facts["duration"], 2)}
+    except Exception as e:  # noqa: BLE001 — anything unreadable is refused
+        if os.path.exists(dest):
+            os.remove(dest)
+        raise HTTPException(status_code=400, detail=f"unusable {kind} file: {str(e)[:120]}")
+    return {"success": True, "asset": name, "kind": kind, **info}
+
+
+def _asset_path(output_dir, name, kind):
+    if not name:
+        return ""
+    if not ASSET_NAME_RE.match(name) or not name.startswith(f"asset_{kind}_"):
+        raise HTTPException(status_code=400, detail=f"invalid {kind} asset")
+    path = os.path.join(output_dir, name)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"{kind} asset not found")
+    return path
+
+
+def _brand_logo_path():
+    path = os.environ.get("BRAND_LOGO_PATH", "").strip()
+    return path if path and os.path.isfile(path) else ""
+
+
+@app.post("/api/clip/package")
+async def package_clip_endpoint(req: ClipPackageRequest, request: Request):
+    """Render the finished short: intro/context card, creator voiceover, logo,
+    source credit and outro around the clip. The clip itself is unchanged."""
+    import short_packager as _pk
+    import render_qc
+    job, output_dir = await _clipforge_job(req.job_id, request)
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        path, data = _clipforge_metadata(output_dir)
+        clips = data.get('shorts', [])
+        if not 0 <= req.clip_index < len(clips):
+            raise HTTPException(status_code=404, detail="Clip not found")
+        clip = clips[req.clip_index]
+        base_name = os.path.basename(path).replace('_metadata.json', '')
+        clean_name = f"{base_name}_clip_{req.clip_index + 1}.mp4"
+        served = _served_clip_file(job, output_dir, base_name, clip, req.clip_index,
+                                   req.input_filename)
+        clip_path = os.path.join(output_dir, served)
+        if not os.path.isfile(clip_path):
+            raise HTTPException(status_code=404, detail="Video file not found")
+        logo = _asset_path(output_dir, req.logo_asset, "logo") or \
+            (_brand_logo_path() if req.use_brand_logo else "")
+        opts = _pk.PackageOptions(
+            intro_title=req.intro_title, intro_context=req.intro_context,
+            intro_seconds=req.intro_seconds,
+            outro_text=(os.environ.get("BRAND_OUTRO_TEXT", "") if req.outro_text is None
+                        else req.outro_text),
+            outro_seconds=req.outro_seconds,
+            credit_text=(os.environ.get("BRAND_CREDIT_TEXT", "") if req.credit_text is None
+                         else req.credit_text),
+            logo_path=logo,
+            logo_corner=req.logo_corner or os.environ.get("BRAND_LOGO_CORNER", "top-right"),
+            accent_color=os.environ.get("BRAND_ACCENT_COLOR", "#FFE500"),
+            voiceover_path=_asset_path(output_dir, req.voiceover_asset, "voiceover"),
+            voiceover_mode=req.voiceover_mode, voiceover_offset=req.voiceover_offset,
+            voiceover_gain_db=req.voiceover_gain_db, duck_source=req.duck_source)
+        try:
+            name, recipe = await asyncio.to_thread(
+                _pk.package_clip, clip_path, output_dir, clean_name, opts)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)[:200])
+        except Exception as e:  # noqa: BLE001
+            print(f"❌ [package] {req.job_id} clip {req.clip_index}: {e}")
+            raise HTTPException(status_code=500, detail="Packaging failed; see the server log.")
+        expected = (1080, 1920) if os.environ.get("RENDER_PRESET") == "hd" and \
+            data.get('output_format') in (None, "auto", "vertical") else None
+        report = await asyncio.to_thread(
+            render_qc.run_qc, os.path.join(output_dir, name), expected_size=expected,
+            expected_duration=recipe["durations"]["total"],
+            hd=os.environ.get("RENDER_PRESET") == "hd")
+        final = {
+            "file": name,
+            "url": f"/videos/{req.job_id}/{name}",
+            "recipe": recipe,
+            "qc": render_qc.read_report(os.path.join(output_dir, name))
+                  or {"status": report.status, "checks": []},
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        clip['final'] = final
+        write_json_atomic(path, data, indent=2)
+        _clipforge_mem_update(job, req.clip_index, final=final)
+    return {"success": True, "final": final}
+
+
 class ClipModeRequest(BaseModel):
     job_id: str
     clip_index: int

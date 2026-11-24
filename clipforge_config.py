@@ -69,8 +69,18 @@ KEY_MAP: dict[str, str] = {
     "render.speech_cleanup": "SPEECH_CLEANUP",
     "render.loudness_normalize": "AUDIO_NORMALIZE",
     "render.quality_checks": "RENDER_QC",
+    # Branding / finished-short packaging (ClipForge Phase 4)
+    "branding.logo_path": "BRAND_LOGO_PATH",
+    "branding.logo_corner": "BRAND_LOGO_CORNER",
+    "branding.accent_color": "BRAND_ACCENT_COLOR",
+    "branding.outro_text": "BRAND_OUTRO_TEXT",
+    "branding.credit_text": "BRAND_CREDIT_TEXT",
+    "branding.auto_package": "BRAND_AUTO_PACKAGE",
+    "branding.auto_intro_card": "BRAND_AUTO_INTRO",
     # Clip selection defaults
     "clips.min_seconds": "CLIP_MIN_SECONDS",
+    "clips.source_map": "SOURCE_MAP",
+    "clips.sentence_boundaries": "CLIP_REFINE",
     "clips.max_seconds": "CLIP_MAX_SECONDS",
 }
 
@@ -78,7 +88,11 @@ KEY_MAP: dict[str, str] = {
 FILE_KEYS = frozenset({"youtube.download_cookies_file"})
 
 # Flags the code reads as "1"/"0" rather than true/false.
-NUMERIC_FLAGS = frozenset({"SPEECH_CLEANUP", "AUDIO_NORMALIZE", "RENDER_QC"})
+NUMERIC_FLAGS = frozenset({"SPEECH_CLEANUP", "AUDIO_NORMALIZE", "RENDER_QC",
+                           "BRAND_AUTO_PACKAGE", "BRAND_AUTO_INTRO", "SOURCE_MAP",
+                           "CLIP_REFINE"})
+# Keys whose value is a path: made absolute (relative to the config file).
+PATH_KEYS = frozenset({"branding.logo_path"})
 
 # Env vars whose value is a credential: never logged or shown.
 SECRET_ENV = frozenset({
@@ -158,6 +172,9 @@ def load(path: Path) -> dict[str, str]:
             continue
         if target in NUMERIC_FLAGS and isinstance(value, bool):
             text = "1" if value else "0"
+        if dotted in PATH_KEYS:
+            file_path = Path(text).expanduser()
+            text = str(file_path if file_path.is_absolute() else path.parent / file_path)
         if dotted in FILE_KEYS:
             file_path = Path(text).expanduser()
             if not file_path.is_absolute():

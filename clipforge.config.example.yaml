@@ -65,9 +65,22 @@ render:
   loudness_normalize: true # -14 LUFS (platform playback level)
   quality_checks: true     # QC report per clip (ffprobe, black/frozen/silence, loudness)
 
+branding:
+  # Your own packaging around every excerpt (dashboard "Finish" button, or
+  # automatically with auto_package). All optional.
+  logo_path: ""            # PNG with transparency; relative to this file or absolute
+  logo_corner: top-right   # top-left | top-right | bottom-left | bottom-right
+  accent_color: "#FFE500"  # title colour on intro/outro cards
+  outro_text: ""           # e.g. "Full episode on my channel"
+  credit_text: ""          # e.g. "Source: <show> by <creator>, CC BY" (attribution)
+  auto_package: false      # true = every clip also gets a final_ file with the above
+  auto_intro_card: false   # true = auto-packaged clips open on a topic/context card
+
 clips:
   min_seconds:             # default 15
   max_seconds:             # default 60 (YouTube Shorts allow up to 180)
+  source_map: true         # whole-episode summary/topics as picker context (1 extra call)
+  sentence_boundaries: true  # cut on whole sentences, keep questions with answers
 
 # Any other environment variable the app reads, verbatim (UPPER_CASE names).
 env: {}

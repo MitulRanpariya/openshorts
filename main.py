@@ -2145,6 +2145,46 @@ def clip_quality_report(served_path, clean_path, output_format, expected_duratio
     return render_qc.read_report(target) or {"status": report.status, "checks": []}
 
 
+def auto_package_clip(served_path, clean_name, clip, output_format):
+    """BRAND_AUTO_PACKAGE=1: also write the branded final_ short for this clip.
+
+    Uses the configured brand (logo, credit, outro; a topic card with
+    BRAND_AUTO_INTRO=1). The served clip is untouched; a failure is logged
+    and the job goes on.
+    """
+    if os.environ.get("BRAND_AUTO_PACKAGE", "0").strip() != "1":
+        return None
+    if not served_path or not os.path.isfile(served_path):
+        return None
+    import short_packager
+    logo = os.environ.get("BRAND_LOGO_PATH", "").strip()
+    title = ""
+    if os.environ.get("BRAND_AUTO_INTRO", "0").strip() == "1":
+        title = clip.get('topic') or clip.get('video_title_for_youtube_short') or ""
+    try:
+        opts = short_packager.PackageOptions(
+            intro_title=title,
+            outro_text=os.environ.get("BRAND_OUTRO_TEXT", ""),
+            credit_text=os.environ.get("BRAND_CREDIT_TEXT", ""),
+            logo_path=logo if logo and os.path.isfile(logo) else "",
+            logo_corner=os.environ.get("BRAND_LOGO_CORNER", "top-right"),
+            accent_color=os.environ.get("BRAND_ACCENT_COLOR", "#FFE500"))
+        if opts.validate().is_empty():
+            return None
+        output_dir = os.path.dirname(served_path)
+        name, recipe = short_packager.package_clip(served_path, output_dir, clean_name, opts)
+    except Exception as e:  # noqa: BLE001 — packaging is an extra, never a failure
+        print(f"   ⚠️ Auto-package skipped: {str(e)[:160]}")
+        return None
+    final = {"file": name, "recipe": recipe}
+    report = clip_quality_report(os.path.join(output_dir, name), os.path.join(output_dir, name),
+                                 output_format, recipe["durations"]["total"])
+    if report:
+        final["qc"] = report
+    print(f"   🎁 Packaged: {name}")
+    return final
+
+
 def mark_delivery(final_path, marker=None):
     """The free-plan copy of a finished clip to serve: ``wm_<final>`` next to it.
 
@@ -3685,6 +3725,9 @@ if __name__ == '__main__':
                         clip['qc'] = clip_quality_report(
                             served, clip_final_path, output_format,
                             None if clip.get('recipe') else end - start)
+                        final = auto_package_clip(served, clip_filename, clip, output_format)
+                        if final:
+                            clip['final'] = final
                         print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
                         # Hand the API the file to actually serve for this clip.
                         # Without it the status poller guesses the clean reframe

@@ -105,7 +105,10 @@ def test_redact_hides_configured_secrets():
 def test_example_file_parses_and_only_uses_known_keys(caplog):
     values = cc.load(REPO / "clipforge.config.example.yaml")
     # Only the recommended render defaults carry a value; no credential does.
-    assert set(values) == {"RENDER_PRESET", "SPEECH_CLEANUP", "AUDIO_NORMALIZE", "RENDER_QC"}
+    assert set(values) == {"RENDER_PRESET", "SPEECH_CLEANUP", "AUDIO_NORMALIZE", "RENDER_QC",
+                           "BRAND_LOGO_CORNER", "BRAND_ACCENT_COLOR", "BRAND_AUTO_PACKAGE",
+                           "BRAND_AUTO_INTRO", "SOURCE_MAP", "CLIP_REFINE"}
+    assert not any("KEY" in k or "SECRET" in k for k in values)
     assert "unknown key" not in caplog.text
 
 
@@ -135,3 +138,10 @@ def test_post_profile_falls_back_to_configured_profile(monkeypatch):
 def test_render_flags_become_numeric(tmp_path):
     p = write(tmp_path, "render: {quality_preset: hd, speech_cleanup: false, quality_checks: true}\n")
     assert cc.load(p) == {"RENDER_PRESET": "hd", "SPEECH_CLEANUP": "0", "RENDER_QC": "1"}
+
+
+def test_logo_path_is_resolved_relative_to_config(tmp_path):
+    p = write(tmp_path, "branding: {logo_path: brand/logo.png, auto_package: true}\n")
+    v = cc.load(p)
+    assert v["BRAND_LOGO_PATH"] == str(tmp_path / "brand" / "logo.png")
+    assert v["BRAND_AUTO_PACKAGE"] == "1"

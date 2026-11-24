@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Share2, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Sparkles } from 'lucide-react';
+import { Download, Share2, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Sparkles, Gift, ThumbsUp, ThumbsDown, Pin } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch, QuotaError, openQuotaWall } from '../lib/api';
 import { platformOptions as buildPlatformOptions, defaultPlatformFlags, flagsFromList } from '../lib/socialPlatforms';
@@ -7,6 +7,7 @@ import { track } from '../lib/analytics';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
+import FinishShortModal from './FinishShortModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
@@ -210,6 +211,29 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // (subtitles, hooks, effects) never get silently dropped.
     // A reopened project seeds it from the persisted project state.
     const [serverVideoFile, setServerVideoFile] = useState(initialState?.server_file || (clip.video_url || '').split('/').pop());
+    // ClipForge: keep/reject/pin decision and the packaged final short.
+    const [review, setReview] = useState(clip.review || null);
+    const [showFinish, setShowFinish] = useState(false);
+    const [finalShort, setFinalShort] = useState(clip.final || null);
+    const [reviewBusy, setReviewBusy] = useState(false);
+    const setDecision = async (decision) => {
+        const next = review?.decision === decision ? 'none' : decision;
+        setReviewBusy(true);
+        try {
+            const res = await apiFetch('/api/clip/review', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ job_id: jobId, clip_index: index, decision: next }),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body.detail || 'Could not save the decision');
+            setReview(body.review);
+        } catch (e) {
+            alert(e.message || String(e));
+        } finally {
+            setReviewBusy(false);
+        }
+    };
     const [videoErrored, setVideoErrored] = useState(false);
     const [resolution, setResolution] = useState(null);
 
@@ -1109,6 +1133,33 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     </p>
                 )}
 
+                {/* ClipForge review: keep / reject / pin, saved with the job. */}
+                <div className="flex items-center gap-2 pt-3" role="group" aria-label="review decision">
+                    {[['keep', ThumbsUp, 'keep'], ['reject', ThumbsDown, 'reject'], ['pin', Pin, 'pin']].map(([d, Icon, label]) => (
+                        <button
+                            key={d}
+                            onClick={() => setDecision(d)}
+                            disabled={reviewBusy}
+                            aria-pressed={review?.decision === d}
+                            className={`flex items-center gap-1 px-2.5 py-1 rounded-full border text-[11px] transition-colors ${review?.decision === d
+                                ? (d === 'reject' ? 'border-warn text-warn' : 'border-ok text-ok')
+                                : 'border-rule text-muted hover:text-ink'}`}
+                        >
+                            <Icon size={12} /> {label}
+                        </button>
+                    ))}
+                    {finalShort?.file && (
+                        <a
+                            href={getApiUrl(finalShort.url || `/videos/${jobId}/${finalShort.file}`)}
+                            download
+                            className="ml-auto text-[11px] text-brass hover:underline flex items-center gap-1"
+                            title={`final short · QC ${finalShort.qc?.status || '—'}`}
+                        >
+                            <Download size={12} /> final short
+                        </a>
+                    )}
+                </div>
+
                 {/* Actions Footer */}
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(104px,1fr))] gap-2 mt-auto pt-4 border-t border-rule">
                     {onEditClip && (
@@ -1181,6 +1232,15 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     >
                         {isTranslating ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Languages size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
                         {isTranslating ? 'translating…' : 'dub voice'}
+                    </button>
+
+                    <button
+                        onClick={() => setShowFinish(true)}
+                        className={QUIET_BTN}
+                        title="Intro/context card, your voiceover, logo, credit and outro around this clip"
+                    >
+                        <Gift size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
+                        finish short
                     </button>
 
                     <button
@@ -1382,6 +1442,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 clipIndex={index}
                 existingHook={activeLayers.hook}
             />
+
+            {showFinish && (
+                <FinishShortModal
+                    isOpen={showFinish}
+                    onClose={() => setShowFinish(false)}
+                    jobId={jobId}
+                    clipIndex={index}
+                    clip={{ ...clip, final: finalShort }}
+                    inputFilename={serverVideoFile}
+                    onDone={setFinalShort}
+                />
+            )}
 
             <HookModal
                 isOpen={showHookModal}
