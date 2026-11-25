@@ -45,5 +45,6 @@ Stored as `context_flags`, shown on the card, and each lowers `predicted_score`:
 - `starts_mid_sentence` (−6)
 - `ends_mid_sentence` (−8)
 - `ends_on_question` (−5)
+- `shortened_to_fit` (−3): the model asked for more than the longest clip allowed, so the clip ends on the last whole sentence that fits
 
 The model's own score stays in `predicted_score_model`.

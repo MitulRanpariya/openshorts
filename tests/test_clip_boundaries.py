@@ -168,3 +168,15 @@ def test_window_id_is_matched_by_number():
     assert cb.valid_proposal(clip, 100, {"window_007"})
     assert cb.valid_proposal({**clip, "source_window_id": "window_7"}, 100, {"window_007"})
     assert not cb.valid_proposal({**clip, "source_window_id": "window_9"}, 100, {"window_007"})
+
+
+def test_a_proposal_longer_than_allowed_ends_on_a_whole_sentence():
+    ws = timeline(["This sentence has exactly six words."] * 12)
+    sents = cb.sentences(ws)
+    s, e = cb.refine_range(sents[0]["start"], sents[11]["end"], sents, 5, 20)
+    assert s == sents[0]["start"] and e - s <= 20
+    assert e in [x["end"] for x in sents]
+    clips = [{"start": sents[0]["start"], "end": sents[11]["end"], "predicted_score": 80}]
+    cb.refine_all(clips, ws, 1000.0, 5, 20)
+    assert "shortened_to_fit" in clips[0]["context_flags"]
+    assert "ends_mid_sentence" not in clips[0]["context_flags"]

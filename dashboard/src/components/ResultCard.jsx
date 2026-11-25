@@ -74,6 +74,7 @@ const CONTEXT_FLAG_TEXT = {
     starts_mid_sentence: 'starts mid-sentence',
     ends_mid_sentence: 'ends mid-sentence',
     ends_on_question: 'ends on a question',
+    shortened_to_fit: 'shortened to fit: check the ending',
 };
 
 export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, serverUploadPost = false, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, onModeChanged = null, onUpgrade = null }) {

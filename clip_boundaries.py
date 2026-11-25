@@ -46,6 +46,7 @@ FLAG_PENALTY = {
     "ends_mid_sentence": 8,
     "ends_on_question": 5,
     "starts_mid_sentence": 6,
+    "shortened_to_fit": 3,
 }
 
 
@@ -113,6 +114,19 @@ def refine_range(start: float, end: float, sents: list, min_d: float, max_d: flo
     can still fall back to word snapping.
     """
     if not sents or end <= start:
+        return start, end
+    if end - start > max_d:
+        # The model ran past the longest clip allowed. The hook is at the start, so keep
+        # it and end on the last whole sentence that fits; cutting at max_d exactly
+        # stopped these clips in the middle of a sentence.
+        k = _start_index(sents, start)
+        new_s = sents[k]["start"] if abs(sents[k]["start"] - start) <= reach else start
+        for ke in range(_end_index(sents, new_s + max_d), -1, -1):
+            length = sents[ke]["end"] - new_s
+            if length <= max_d:
+                if length >= max(min_d, 0.5 * max_d):
+                    return round(new_s, 3), round(sents[ke]["end"], 3)
+                break
         return start, end
     k_s = _start_index(sents, start)
     # Start: the containing sentence's start; if that is too far back, the next.
@@ -232,8 +246,12 @@ def refine_all(shorts: list, words: list, duration: float, min_d: float, max_d: 
     """
     sents = sentences(words)
     for c in shorts:
+        too_long = float(c["end"]) - float(c["start"]) > max_d + 0.5
         s, e = refine_range(float(c["start"]), float(c["end"]), sents, min_d, max_d)
         flags = context_flags(s, e, words, sents, language)
+        if too_long:
+            # The model wanted more than fits: the payoff may be past the new end.
+            flags.append("shortened_to_fit")
         if "starts_mid_thought" in flags:
             # "And then he quit." needs the sentence before it: pull the start
             # back one sentence when that still fits the band.
@@ -241,7 +259,8 @@ def refine_all(shorts: list, words: list, duration: float, min_d: float, max_d: 
             if k > 0 and e - sents[k - 1]["start"] <= max_d \
                     and s - sents[k - 1]["start"] <= 2 * REACH:
                 s = round(sents[k - 1]["start"], 3)
-                flags = context_flags(s, e, words, sents, language)
+                flags = context_flags(s, e, words, sents, language) + \
+                    (["shortened_to_fit"] if too_long else [])
         c["start"], c["end"] = s, e
         c["context_flags"] = flags
         if flags:
