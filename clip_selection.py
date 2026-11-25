@@ -553,7 +553,10 @@ def apply_score_breakdown(clip):
         clip.pop(name, None)
     if not breakdown:
         return clip
-    editorial = sum(breakdown[k] * w for k, w in SCORE_DIMENSIONS.items()) * 10
+    # A dimension the model left out (0) takes no part: the rest are re-weighted, so a
+    # half-filled answer is not ranked as if it had failed the missing ones.
+    given = {k: w for k, w in SCORE_DIMENSIONS.items() if breakdown[k] > 0}
+    editorial = sum(breakdown[k] * w for k, w in given.items()) / sum(given.values()) * 10
     try:
         model = int(clip.get("predicted_score") or 0)
     except (TypeError, ValueError):

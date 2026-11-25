@@ -153,8 +153,15 @@ def _as_env_value(dotted: str, value: Any) -> Optional[str]:
     if value is None or value == "":
         return None
     if isinstance(value, list) and dotted in LIST_KEYS:
-        items = [str(v).strip() for v in value if isinstance(v, (str, int, float))
-                 and str(v).strip()]
+        items = []
+        for v in value:
+            if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+                continue
+            if isinstance(v, int) and dotted.endswith("_times"):
+                # YAML reads an unquoted 18:00 as the base-60 number 1080.
+                v = f"{v // 60:02d}:{v % 60:02d}"
+            if str(v).strip():
+                items.append(str(v).strip())
         return ",".join(items) or None
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -196,8 +203,15 @@ def load(path: Path) -> dict[str, str]:
         text = _as_env_value(dotted, value)
         if text is None:
             continue
-        if target in NUMERIC_FLAGS and isinstance(value, bool):
-            text = "1" if value else "0"
+        if target in NUMERIC_FLAGS:
+            # true / "false" / yes / off / 1: the code reads these flags as "1" or "0".
+            word = text.strip().lower()
+            if word in ("true", "yes", "on", "1"):
+                text = "1"
+            elif word in ("false", "no", "off", "0"):
+                text = "0"
+            else:
+                raise ConfigError(f"{dotted}: expected true or false")
         if dotted in PATH_KEYS:
             file_path = Path(text).expanduser()
             text = str(file_path if file_path.is_absolute() else path.parent / file_path)

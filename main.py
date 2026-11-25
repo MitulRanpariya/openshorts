@@ -2116,7 +2116,21 @@ def qc_enabled():
     return value == "1" if value else hd_preset()
 
 
-def clip_quality_report(served_path, clean_path, output_format, expected_duration):
+def _cut_has_audio(path):
+    """Whether the clip's raw cut of the source carries an audio stream (True when
+    it cannot be told, so a real loss of audio is still reported)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+             "stream=index", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30)
+        return out.returncode != 0 or bool(out.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
+def clip_quality_report(served_path, clean_path, output_format, expected_duration,
+                        expect_audio=True):
     """Run render_qc on the clip about to be announced; a summary for metadata.
 
     The served file may be a lazy hook copy that is encoded on first request;
@@ -2135,7 +2149,8 @@ def clip_quality_report(served_path, clean_path, output_format, expected_duratio
         expected = hd_delivery_size(1.0 if output_format == "square" else ASPECT_RATIO)
     try:
         report = render_qc.run_qc(target, expected_size=expected,
-                                  expected_duration=expected_duration, hd=hd_preset())
+                                  expected_duration=expected_duration, hd=hd_preset(),
+                                  expect_audio=expect_audio)
     except Exception as e:  # noqa: BLE001 — a QC crash must not fail the clip
         print(f"   ⚠️ QC could not run: {type(e).__name__}")
         return {"status": "WARN", "checks": [
@@ -2857,11 +2872,14 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
 
         def _timed_sentences(w):
             # The detail pass used to see each window as one block of prose and
-            # had to guess where inside it a sentence starts. [start, text]
-            # pairs (0.1 s) let it pick real boundaries; the end of a clip is
-            # the start of the sentence after its last one.
-            return [[round(x["start"], 1), x["text"]] for x in timed_sentences
-                    if x["start"] >= w["start"] - 0.05 and x["end"] <= w["end"] + 0.05]
+            # had to guess where inside it a sentence starts. [start, end, text]
+            # (0.1 s) lets it pick real boundaries. A sentence that straddles
+            # the window's edge is listed too: windows follow ASR segments and
+            # sentences follow punctuation, so dropping those hid up to a fifth
+            # of the words (far more in Hindi) from the pass that picks.
+            return [[round(x["start"], 1), round(x["end"], 1), x["text"]]
+                    for x in timed_sentences
+                    if x["end"] > w["start"] + 0.05 and x["start"] < w["end"] - 0.05]
 
         def _payload(ws, timed=False):
             out = []
@@ -2959,15 +2977,21 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         # ranking score before anything is trimmed by it.
         for s_ in shorts:
             apply_score_breakdown(s_)
-        if len(shorts) > max_clips:
-            # By score, never by position: the results arrive in transcript
-            # order, so slicing kept the earliest clips and silently dropped
-            # the back half of the video. See trim_to_best.
-            dropped = len(shorts) - max_clips
-            shorts = trim_to_best(shorts, max_clips)
-            print(f"   Kept the {max_clips} best-scoring clip(s) of "
-                  f"{max_clips + dropped}.")
+
+        def _trim(shorts):
+            if len(shorts) > max_clips:
+                # By score, never by position: the results arrive in transcript
+                # order, so slicing kept the earliest clips and silently dropped
+                # the back half of the video. See trim_to_best.
+                dropped = len(shorts) - max_clips
+                shorts = trim_to_best(shorts, max_clips)
+                print(f"   Kept the {max_clips} best-scoring clip(s) of "
+                      f"{max_clips + dropped}.")
+            return shorts
+
         refine = clip_refine_enabled()
+        if not refine:
+            shorts = _trim(shorts)
         if refine:
             # Schema-valid is not sane: a range outside the source or a window
             # id the model invented cannot be cut.
@@ -2991,7 +3015,8 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         for s in shorts:
             ns, ne = snap_clip_to_words(s.get("start", 0), s.get("end", 0), words, video_duration,
                                         min_duration=min_secs, max_duration=max_secs)
-            s["start"], s["end"] = ns, ne
+            # Never past the last frame: the file would come out shorter than promised.
+            s["start"], s["end"] = ns, min(ne, video_duration) if video_duration else ne
         deduped = dedupe_overlapping(shorts)
         if len(deduped) < len(shorts):
             print(f"   Dropped {len(shorts) - len(deduped)} clip(s) overlapping a "
@@ -3003,6 +3028,9 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
                 print(f"   Dropped {len(shorts) - len(similar)} clip(s) repeating a "
                       f"better-scored one's content.")
                 shorts = similar
+            # Trim last: the context penalties and both dedupes have spoken, so a clip
+            # that is about to be dropped or marked down never displaces a clean one.
+            shorts = _trim(shorts)
 
         # Aggregate cost across both passes.
         cost_analysis = None
@@ -3724,7 +3752,10 @@ if __name__ == '__main__':
                         # A pro-mode recipe drops silences: its length is its own.
                         clip['qc'] = clip_quality_report(
                             served, clip_final_path, output_format,
-                            None if clip.get('recipe') else end - start)
+                            None if clip.get('recipe') else end - start,
+                            # A source without sound gives clips without sound:
+                            # that is not a broken render.
+                            expect_audio=_cut_has_audio(clip_temp_path))
                         final = auto_package_clip(served, clip_filename, clip, output_format)
                         if final:
                             clip['final'] = final

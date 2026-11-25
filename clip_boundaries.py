@@ -21,10 +21,12 @@ Pure functions over the word list ``[{'w','s','e'}]``; no I/O, no model.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Optional
 
-TERMINAL = re.compile(r"[.!?…。！？]['\")\]]*$")
-QUESTION = re.compile(r"\?['\")\]]*$")
+# Sentence enders: Latin, CJK, Devanagari danda (Hindi), Arabic/Urdu.
+TERMINAL = re.compile(r"[.!?…。！？।॥۔؟]['\")\]]*$")
+QUESTION = re.compile(r"[?？؟]['\")\]]*$")
 PAUSE_BREAK = 0.8           # s of silence that ends a sentence without punctuation
 MAX_SENTENCE_SECONDS = 25.0  # run-on transcripts: force a break
 REACH = 8.0                 # how far an edge may move to find a sentence boundary
@@ -48,7 +50,14 @@ FLAG_PENALTY = {
 
 
 def _clean(word: str) -> str:
-    return re.sub(r"[^\w']+", "", word or "").lower()
+    """Letters, combining marks and digits only (``\\w`` drops the vowel signs of
+    Devanagari and other scripts, which turned words into consonant skeletons)."""
+    return "".join(ch for ch in (word or "")
+                   if ch == "'" or unicodedata.category(ch)[0] in "LMN").lower()
+
+
+def _letters(token: str) -> int:
+    return sum(1 for ch in token if unicodedata.category(ch)[0] in "LN")
 
 
 def sentences(words: list) -> list:
@@ -73,16 +82,27 @@ def sentences(words: list) -> list:
     return out
 
 
-def _index_at(sents, t):
-    """Index of the sentence containing time ``t`` (or the nearest one)."""
-    best, best_d = 0, float("inf")
+EDGE = 0.05   # s; a time this close to a boundary counts as on it
+
+
+def _start_index(sents, t):
+    """The sentence a clip starting at ``t`` opens with: the one being spoken at ``t``,
+    or the next one when ``t`` falls in a pause."""
     for k, s in enumerate(sents):
-        if s["start"] <= t <= s["end"]:
+        if s["end"] > t + EDGE:
             return k
-        d = min(abs(t - s["start"]), abs(t - s["end"]))
-        if d < best_d:
-            best, best_d = k, d
-    return best
+    return len(sents) - 1
+
+
+def _end_index(sents, t):
+    """The sentence a clip ending at ``t`` closes with: the one being spoken at ``t``,
+    or the previous one when ``t`` falls in a pause. A time in the gap after a sentence
+    (where the model is told to end, and where "the next sentence's start" lands) must
+    never pull the following sentence in."""
+    for k in range(len(sents) - 1, -1, -1):
+        if sents[k]["start"] < t - EDGE:
+            return k
+    return 0
 
 
 def refine_range(start: float, end: float, sents: list, min_d: float, max_d: float,
@@ -94,11 +114,11 @@ def refine_range(start: float, end: float, sents: list, min_d: float, max_d: flo
     """
     if not sents or end <= start:
         return start, end
-    k_s = _index_at(sents, start)
+    k_s = _start_index(sents, start)
     # Start: the containing sentence's start; if that is too far back, the next.
     s_opts = [k for k in (k_s, k_s + 1) if k < len(sents)
               and abs(sents[k]["start"] - start) <= reach]
-    k_e = _index_at(sents, end)
+    k_e = _end_index(sents, end)
     # End: the containing sentence's end; if that is too far on, the previous.
     e_opts = [k for k in (k_e, k_e - 1) if k >= 0
               and abs(sents[k]["end"] - end) <= reach]
@@ -128,14 +148,14 @@ def context_flags(start: float, end: float, words: list, sents: list,
     first, last = inside[0], inside[-1]
     if (language or "").lower().startswith("en") and _clean(first.get("w")) in DANGLING_OPENERS:
         flags.append("starts_mid_thought")
-    k = _index_at(sents, float(first["s"]))
+    k = _start_index(sents, float(first["s"]))
     if sents and float(first["s"]) - sents[k]["start"] > 0.3:
         flags.append("starts_mid_sentence")
     last_text = str(last.get("w", "")).strip()
     if QUESTION.search(last_text):
         flags.append("ends_on_question")
     elif not TERMINAL.search(last_text):
-        k = _index_at(sents, float(last["e"]))
+        k = _end_index(sents, float(last["e"]))
         if sents and sents[k]["end"] - float(last["e"]) > 0.3:
             flags.append("ends_mid_sentence")
     return flags
@@ -147,7 +167,8 @@ def penalty(flags: list) -> int:
 
 def _tokens(start, end, words):
     return {_clean(w.get("w")) for w in words
-            if float(w["s"]) >= start and float(w["e"]) <= end and len(_clean(w.get("w"))) > 3}
+            if float(w["s"]) >= start and float(w["e"]) <= end
+            and _letters(_clean(w.get("w"))) > 3}
 
 
 def dedupe_similar(shorts: list, words: list, threshold: float = 0.55) -> list:
@@ -188,9 +209,17 @@ def valid_proposal(clip: dict, duration: float, window_ids: Optional[set] = None
         return False
     if not (0 <= s < e <= duration + 1.0):
         return False
-    if window_ids is not None and clip.get("source_window_id") not in window_ids:
+    if window_ids is not None and _window_number(clip.get("source_window_id")) not in \
+            {_window_number(w) for w in window_ids}:
         return False
     return True
+
+
+def _window_number(window_id):
+    """``window_007``, ``window_7`` and ``7`` are the same window: small local models
+    rarely copy the id character for character."""
+    digits = re.findall(r"\d+", str(window_id if window_id is not None else ""))
+    return int(digits[-1]) if digits else str(window_id)
 
 
 def refine_all(shorts: list, words: list, duration: float, min_d: float, max_d: float,
@@ -208,7 +237,7 @@ def refine_all(shorts: list, words: list, duration: float, min_d: float, max_d: 
         if "starts_mid_thought" in flags:
             # "And then he quit." needs the sentence before it: pull the start
             # back one sentence when that still fits the band.
-            k = _index_at(sents, s)
+            k = _start_index(sents, s)
             if k > 0 and e - sents[k - 1]["start"] <= max_d \
                     and s - sents[k - 1]["start"] <= 2 * REACH:
                 s = round(sents[k - 1]["start"], 3)

@@ -456,3 +456,11 @@ def test_detail_schema_accepts_clips_without_dimensions():
         "video_description_for_tiktok": "", "video_description_for_instagram": "",
         "video_title_for_youtube_short": "", "viral_hook_text": ""})
     assert clip.hook == 0 and clip.ending == 0
+
+
+def test_missing_score_dimensions_are_not_counted_as_zero():
+    from clip_selection import apply_score_breakdown
+    full = apply_score_breakdown({"predicted_score": 80, "hook": 8, "stands_alone": 8,
+                                  "payoff": 8, "value": 8, "emotion": 8, "ending": 8})
+    partial = apply_score_breakdown({"predicted_score": 80, "hook": 8, "payoff": 8})
+    assert partial["editorial_score"] == full["editorial_score"] == 80

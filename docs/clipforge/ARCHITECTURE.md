@@ -17,7 +17,8 @@ delivery steps).
      ├─ refine_all ............... sentence edges, Q→A, dangling openers, context_flags
      ├─ snap_clip_to_words ...... (upstream) pauses between words
      ├─ dedupe_overlapping ...... (upstream) temporal
-     └─ dedupe_similar .......... same story told twice
+     ├─ dedupe_similar .......... same story told twice
+     └─ trim_to_best ............ to the requested count, after penalties and dedupes
    per clip: cut ─► reframe ─► hook + captions (upstream)
      ├─ render encode args ...... RENDER_PRESET=hd (ffmpeg_utils)
      ├─ clip_quality_report ..... render_qc → <clip>.qc.json + clip['qc']               [RENDER_QC]

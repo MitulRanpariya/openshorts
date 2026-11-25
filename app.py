@@ -1729,7 +1729,7 @@ def _unmark_local_job(job_id, clip_index, clean_filename):
             shorts = data.get('shorts', [])
             if clip_index < len(shorts):
                 shorts[clip_index]['video_url'] = url
-                write_json_atomic(meta_path, data, indent=4)
+                _write_clip_metadata(meta_path, data, indent=4)
         except Exception as e:
             print(f"⚠️ Could not unmark metadata of {job_id}: {e}")
     watermarked.unmark_job(job_dir)
@@ -7520,7 +7520,7 @@ async def edit_clip(
                 if req.clip_index < len(shorts):
                     shorts[req.clip_index]['video_url'] = new_video_url
                     meta['shorts'] = shorts
-                    write_json_atomic(meta_files[0], meta, indent=4)
+                    _write_clip_metadata(meta_files[0], meta, indent=4)
         except Exception as e:
             print(f"⚠️ Failed to update metadata.json: {e}")
 
@@ -7964,7 +7964,7 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
         updates.update(_leaves_pro_mode(clip))
         clip.update(updates)
         data['shorts'] = clips
-        write_json_atomic(json_files[0], data, indent=2)
+        _write_clip_metadata(json_files[0], data, indent=2)
         mem_clips = (job.get('result') or {}).get('clips') or []
         if req.clip_index < len(mem_clips):
             mem_clips[req.clip_index].update(updates)
@@ -8059,6 +8059,39 @@ def _clipforge_metadata(output_dir):
         raise HTTPException(status_code=404, detail="Metadata not found")
     with open(files[0], 'r') as f:
         return files[0], json.load(f)
+
+
+CLIPFORGE_JOB_KEYS = ("rights", "rights_log")
+CLIPFORGE_CLIP_KEYS = ("review", "final", "youtube")
+
+
+def _write_clip_metadata(path, data, indent=2):
+    """Write a job's metadata from an editor that read it a while ago (a subtitle burn,
+    a recut, a hook edit) without losing what ClipForge stored in the meantime: the
+    rights record and each clip's review, final short and upload always come from the
+    file as it is now. ClipForge's own writers re-read under the job lock instead."""
+    try:
+        with open(path, 'r') as f:
+            disk = json.load(f)
+    except (OSError, ValueError):
+        disk = None
+    if isinstance(disk, dict) and isinstance(data, dict):
+        for key in CLIPFORGE_JOB_KEYS:
+            if key in disk:
+                data[key] = disk[key]
+            else:
+                data.pop(key, None)
+        mine, theirs = data.get('shorts'), disk.get('shorts')
+        if isinstance(mine, list) and isinstance(theirs, list) and len(mine) == len(theirs):
+            for clip, current in zip(mine, theirs):
+                if not isinstance(clip, dict) or not isinstance(current, dict):
+                    continue
+                for key in CLIPFORGE_CLIP_KEYS:
+                    if key in current:
+                        clip[key] = current[key]
+                    else:
+                        clip.pop(key, None)
+    write_json_atomic(path, data, indent=indent)
 
 
 def _clipforge_mem_update(job, index, **fields):
@@ -8215,8 +8248,12 @@ async def package_clip_endpoint(req: ClipPackageRequest, request: Request):
                   or {"status": report.status, "checks": []},
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        clip['final'] = final
-        write_json_atomic(path, data, indent=2)
+        final["source"] = served
+        # The render took a while: write into the metadata as it is now.
+        path, data = _clipforge_metadata(output_dir)
+        if req.clip_index < len(data.get('shorts', [])):
+            data['shorts'][req.clip_index]['final'] = final
+            write_json_atomic(path, data, indent=2)
         _clipforge_mem_update(job, req.clip_index, final=final)
     return {"success": True, "final": final}
 
@@ -8285,10 +8322,13 @@ async def youtube_status():
             with httpx.Client(timeout=20) as http:
                 return ytp.channel_info(http)
         try:
-            _yt_channel_cache.update(at=time.time(), info=await asyncio.to_thread(_channel))
+            _yt_channel_cache.update(at=time.time(), error=None,
+                                     info=await asyncio.to_thread(_channel))
         except Exception as e:  # noqa: BLE001
-            _yt_channel_cache.update(at=time.time(), info=None)
-            info["error"] = str(e)[:160]
+            # Retry in a minute, and keep saying why until a lookup works.
+            _yt_channel_cache.update(at=time.time() - 540, info=None, error=str(e)[:160])
+    if info["connected"] and _yt_channel_cache.get("error"):
+        info["error"] = _yt_channel_cache["error"]
     info["channel"] = (_yt_channel_cache["info"] or {}).get("title") if info["connected"] else None
     return info
 
@@ -8348,20 +8388,27 @@ async def youtube_metadata(req: YouTubeMetadataRequest, request: Request):
 def _clip_upload_file(job, output_dir, data, index, use_final, asked=None):
     """(path, qc) of the file to upload: the packaged final when wanted."""
     clip = data['shorts'][index]
-    final = clip.get('final') or {}
-    if use_final and final.get('file') and os.path.isfile(os.path.join(output_dir, final['file'])):
-        return os.path.join(output_dir, final['file']), final.get('qc')
     base_name = None
     for f in glob.glob(os.path.join(output_dir, "*_metadata.json")):
         base_name = os.path.basename(f).replace('_metadata.json', '')
     served = _served_clip_file(job, output_dir, base_name, clip, index, asked)
+    final = clip.get('final') if isinstance(clip.get('final'), dict) else {}
+    # The name comes from a file in the job directory: a bare file name of this job only.
+    final_name = os.path.basename(str(final.get('file') or ''))
+    # A final packaged from an older version of the clip (it was re-subtitled, recut or
+    # re-hooked since) is not what the creator is looking at: upload the current clip.
+    current = not final.get('source') or final.get('source') == served
+    if use_final and current and final_name.startswith("final_") and \
+            os.path.isfile(os.path.join(output_dir, final_name)):
+        return os.path.join(output_dir, final_name), final.get('qc')
     return os.path.join(output_dir, served), clip.get('qc')
 
 
 def _publish_one(job_id, job, index, title=None, description=None, tags=None,
                  privacy="private", publish_at=None, use_final=True, api_key=None,
                  asked=None):
-    """Blocking: gate, write metadata, upload, persist. Returns the record."""
+    """Blocking: gate, draft the texts, upload. Returns the record to store on the clip
+    (``_publish_clip`` stores it)."""
     import publish_metadata as pm
     import youtube_publisher as ytp
     output_dir = os.path.join(OUTPUT_DIR, job_id)
@@ -8394,23 +8441,57 @@ def _publish_one(job_id, job, index, title=None, description=None, tags=None,
         title = drafted["title"]
         description = description if description is not None else drafted["description"]
         tags = tags if tags is not None else drafted["tags"]
+    # The credit is part of the licence: it goes in whoever wrote the description, and
+    # whenever the rights were recorded.
+    credit = pm.attribution_line(rights)
+    if credit and credit not in (description or ""):
+        description = f"{(description or '').rstrip()}\n\n{credit}".strip()
     language = (data.get('transcript') or {}).get('language')
     body = ytp.build_body(title, description or "", tags or [], privacy=privacy,
                           publish_at=publish_at, category_id=cfg["category_id"],
                           language=language if language and language != "none" else None)
-    with httpx.Client(timeout=120) as http:
-        record = ytp.upload(video_path, body, http)
+    try:
+        with httpx.Client(timeout=120) as http:
+            record = ytp.upload(video_path, body, http)
+    except httpx.HTTPError as e:
+        raise ytp.YouTubeError(f"could not reach YouTube ({type(e).__name__}); try again") from e
     public = {k: v for k, v in record.items() if k != "upload_url"}
     duration = float(clip.get('end', 0)) - float(clip.get('start', 0))
     warning = ytp.shorts_warning(duration, rights)
     if warning:
         public["warning"] = warning
-    # Persist under the metadata lock's protection of the caller.
-    path, data = _clipforge_metadata(output_dir)
-    data['shorts'][index]['youtube'] = public
-    write_json_atomic(path, data, indent=2)
-    _clipforge_mem_update(job, index, youtube=public)
     return public
+
+
+_publishing = set()          # (job_id, clip index) with an upload in flight
+_autopublish_tasks = set()   # keeps the background uploads referenced until they end
+
+
+async def _publish_clip(job_id, job, index, **kwargs):
+    """Upload one clip and store the result. The job lock is held only for the metadata
+    write, so reviewing or editing the job's other clips never waits for an upload."""
+    import youtube_publisher as ytp
+    slot = (job_id, index)
+    if slot in _publishing:
+        raise ytp.YouTubeError("this clip is already uploading")
+    _publishing.add(slot)
+    try:
+        public = await asyncio.to_thread(_publish_one, job_id, job, index, **kwargs)
+        lock = _rerender_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            path, data = _clipforge_metadata(os.path.join(OUTPUT_DIR, job_id))
+            if index < len(data.get('shorts', [])):
+                stored = {k: v for k, v in public.items() if k != "duplicate"}
+                # A repeat of a finished upload keeps the metrics already fetched for it.
+                old = data['shorts'][index].get('youtube') or {}
+                if old.get('video_id') == stored.get('video_id') and old.get('metrics'):
+                    stored['metrics'] = old['metrics']
+                data['shorts'][index]['youtube'] = stored
+                write_json_atomic(path, data, indent=2)
+                _clipforge_mem_update(job, index, youtube=stored)
+        return public
+    finally:
+        _publishing.discard(slot)
 
 
 @app.post("/api/youtube/upload")
@@ -8424,17 +8505,15 @@ async def youtube_upload(req: YouTubeUploadRequest, request: Request):
     if not 0 <= req.clip_index < len(data.get('shorts', [])):
         raise HTTPException(status_code=404, detail="Clip not found")
     api_key = await resolve_gemini(request)
-    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
-    async with lock:
-        try:
-            record = await asyncio.to_thread(
-                _publish_one, req.job_id, job, req.clip_index, req.title, req.description,
-                req.tags, req.privacy, req.publish_at, req.use_final, api_key,
-                req.input_filename)
-        except ytp.NotConnected as e:
-            raise HTTPException(status_code=409, detail=str(e))
-        except (ytp.YouTubeError, ValueError) as e:
-            raise HTTPException(status_code=400, detail=str(e))
+    try:
+        record = await _publish_clip(
+            req.job_id, job, req.clip_index, title=req.title, description=req.description,
+            tags=req.tags, privacy=req.privacy, publish_at=req.publish_at,
+            use_final=req.use_final, api_key=api_key, asked=req.input_filename)
+    except ytp.NotConnected as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except (ytp.YouTubeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, "youtube": record}
 
 
@@ -8496,42 +8575,56 @@ async def _clipforge_autopublish(job_id, job, only=None):
         return  # waits for the creator's keep/pin on each clip
 
     async def run():
-        lock = _rerender_locks.setdefault(job_id, asyncio.Lock())
-        async with lock:
-            output_dir = os.path.join(OUTPUT_DIR, job_id)
+        output_dir = os.path.join(OUTPUT_DIR, job_id)
+        try:
+            _path, data = _clipforge_metadata(output_dir)
+        except HTTPException:
+            return
+        shorts = data.get('shorts', [])
+        picks = [i for i in (only if only is not None else ytp.pick_clips(shorts, cfg))
+                 if 0 <= i < len(shorts) and not (shorts[i].get('youtube') or {}).get('video_id')
+                 and (job_id, i) not in _publishing]
+        public_ok, _reason = ytp.rights_allow_public(_effective_rights(data))
+        slots = (ytp.claim_slots(len(picks), cfg["schedule_times"], cfg["timezone"])
+                 if public_ok and cfg["schedule_times"] else [])
+        stop = False
+        for n, index in enumerate(picks):
+            publish_at = slots[n] if n < len(slots) else None
+            privacy = cfg["privacy"]
+            if privacy == "public" and not public_ok:
+                privacy = "private"
+            used_slot = False
             try:
-                _path, data = _clipforge_metadata(output_dir)
-            except HTTPException:
-                return
-            shorts = data.get('shorts', [])
-            picks = [i for i in (only if only is not None else ytp.pick_clips(shorts, cfg))
-                     if 0 <= i < len(shorts) and not (shorts[i].get('youtube') or {}).get('video_id')]
-            rights = _effective_rights(data)
-            public_ok, _reason = ytp.rights_allow_public(rights)
-            slots = (ytp.next_slots(len(picks), cfg["schedule_times"], cfg["timezone"],
-                                    ytp.taken_slots())
-                     if public_ok and cfg["schedule_times"] else [])
-            for n, index in enumerate(picks):
-                publish_at = slots[n] if n < len(slots) else None
-                privacy = cfg["privacy"]
-                if privacy == "public" and not public_ok:
-                    privacy = "private"
-                try:
-                    record = await asyncio.to_thread(
-                        _publish_one, job_id, job, index, None, None, None,
-                        privacy, publish_at, cfg["use_final"], os.environ.get("GEMINI_API_KEY"))
-                    if publish_at:
-                        ytp.reserve_slot(publish_at)
-                    job.setdefault('logs', []).append(
-                        f"📺 YouTube: clip {index + 1} uploaded ({record.get('privacy')}"
-                        f"{', publishes ' + publish_at if publish_at else ''}) {record.get('url', '')}")
-                except Exception as e:  # noqa: BLE001
-                    job.setdefault('logs', []).append(
-                        f"⚠️ YouTube: clip {index + 1} not uploaded: {str(e)[:200]}")
-                    if "limit" in str(e) or "quota" in str(e):
-                        break
+                if stop:
+                    continue
+                record = await _publish_clip(
+                    job_id, job, index, privacy=privacy, publish_at=publish_at,
+                    use_final=cfg["use_final"], api_key=os.environ.get("GEMINI_API_KEY"))
+                used_slot = bool(publish_at) and not record.get("duplicate")
+                job.setdefault('logs', []).append(
+                    f"📺 YouTube: clip {index + 1} "
+                    + ("was already uploaded" if record.get("duplicate") else
+                       f"uploaded ({record.get('privacy')}"
+                       f"{', publishes ' + publish_at if publish_at else ''})")
+                    + f" {record.get('url', '')}")
+            except Exception as e:  # noqa: BLE001
+                job.setdefault('logs', []).append(
+                    f"⚠️ YouTube: clip {index + 1} not uploaded: {str(e)[:200]}")
+                if "limit" in str(e) or "quota" in str(e):
+                    stop = True
+            finally:
+                if publish_at and not used_slot:
+                    ytp.release_slot(publish_at)
 
-    asyncio.create_task(run())
+    async def guarded():
+        try:
+            await run()
+        except Exception as e:  # noqa: BLE001 — a background task has nobody to raise to
+            job.setdefault('logs', []).append(f"⚠️ YouTube auto-upload stopped: {str(e)[:200]}")
+
+    task = asyncio.create_task(guarded())
+    _autopublish_tasks.add(task)
+    task.add_done_callback(_autopublish_tasks.discard)
 
 
 class ClipModeRequest(BaseModel):
@@ -8715,7 +8808,7 @@ async def _set_clip_mode_locked(req: ClipModeRequest, request: Request, job):
         clip.update(updates)
         clip['video_url'] = f"/videos/{req.job_id}/{new_base}"
         data['shorts'] = clips
-        write_json_atomic(json_files[0], data, indent=2)
+        _write_clip_metadata(json_files[0], data, indent=2)
 
         def layer():
             name = new_base
@@ -8745,7 +8838,7 @@ async def _set_clip_mode_locked(req: ClipModeRequest, request: Request, job):
         final = reuse or await loop.run_in_executor(None, layer)
         final = await _deliver(request, req.job_id, final)
         clip['video_url'] = f"/videos/{req.job_id}/{final}"
-        write_json_atomic(json_files[0], data, indent=2)
+        _write_clip_metadata(json_files[0], data, indent=2)
         mem_clips = (job.get('result') or {}).get('clips') or []
         if req.clip_index < len(mem_clips):
             mem_clips[req.clip_index].update(updates)
@@ -9093,7 +9186,7 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
         updates.update(_leaves_pro_mode(clip))
         clip.update(updates)
         data['shorts'] = clips
-        write_json_atomic(json_files[0], data, indent=2)
+        _write_clip_metadata(json_files[0], data, indent=2)
         mem_clips = (job.get('result') or {}).get('clips') or []
         if req.clip_index < len(mem_clips):
             mem_clips[req.clip_index].update(updates)
@@ -9542,7 +9635,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
             data['shorts'] = clips
             
             # Write back
-            write_json_atomic(json_files[0], data, indent=4)
+            _write_clip_metadata(json_files[0], data, indent=4)
             print(f"✅ Metadata updated with subtitled video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
@@ -9610,7 +9703,7 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
     try:
         clips[req.clip_index]['video_url'] = new_url
         data['shorts'] = clips
-        write_json_atomic(json_files[0], data, indent=4)
+        _write_clip_metadata(json_files[0], data, indent=4)
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
 
@@ -9757,7 +9850,7 @@ async def add_hook(req: HookRequest, request: Request):
         if req.clip_index < len(clips):
             clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
             data['shorts'] = clips
-            write_json_atomic(json_files[0], data, indent=4)
+            _write_clip_metadata(json_files[0], data, indent=4)
             print(f"✅ Metadata updated with hook video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")
@@ -9886,7 +9979,7 @@ async def translate_clip(
         if req.clip_index < len(clips):
             clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
             data['shorts'] = clips
-            write_json_atomic(json_files[0], data, indent=4)
+            _write_clip_metadata(json_files[0], data, indent=4)
             print(f"✅ Metadata updated with translated video for clip {req.clip_index}")
     except Exception as e:
         print(f"⚠️ Failed to update metadata.json: {e}")

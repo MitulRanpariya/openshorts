@@ -295,7 +295,7 @@ def rights_allow_public(rights: Optional[dict]):
         if rights.get("intended_use", "monetized") == "monetized" and \
                 (" NC" in f" {lic}" or " ND" in f" {lic}"):
             return False, "a NonCommercial/NoDerivatives licence does not allow a monetised edit"
-        if not rights.get("attribution"):
+        if not rights.get("attribution") and not lic.replace(" ", "").startswith("CC0"):
             return False, "a CC BY source needs the attribution text"
     return True, ""
 
@@ -319,7 +319,12 @@ def max_per_day() -> int:
 
 def _today():
     # The API's quota resets at midnight Pacific time.
-    return (datetime.now(timezone.utc) - timedelta(hours=8)).strftime("%Y-%m-%d")
+    now = datetime.now(timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return now.astimezone(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001  (no tz database: standard time is close enough)
+        return (now - timedelta(hours=8)).strftime("%Y-%m-%d")
 
 
 def uploads_today() -> int:
@@ -367,7 +372,15 @@ def build_body(title, description, tags=None, privacy="private", publish_at=None
     snippet = {"title": title,
                "description": str(description or "").replace("<", "").replace(">", "")[:4900],
                "categoryId": str(category_id or "22")}
-    clean_tags = [t.strip().lstrip("#")[:60] for t in (tags or []) if str(t).strip()][:20]
+    clean_tags, used = [], 0
+    for t in (tags or []):
+        t = str(t).strip().lstrip("#").replace("<", "").replace(">", "")[:60]
+        # YouTube refuses a tag list over 500 characters (a tag with a space counts its quotes).
+        cost = len(t) + 1 + (2 if " " in t else 0)
+        if not t or t in clean_tags or used + cost > 450 or len(clean_tags) >= 20:
+            continue
+        clean_tags.append(t)
+        used += cost
     if clean_tags:
         snippet["tags"] = clean_tags
     if language:
@@ -375,78 +388,135 @@ def build_body(title, description, tags=None, privacy="private", publish_at=None
     return {"snippet": snippet, "status": status}
 
 
+def _body_hash(body: dict) -> str:
+    return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False)
+                          .encode()).hexdigest()[:24]
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _open_session(video_path, body, http, key, size) -> dict:
+    if uploads_today() >= max_per_day():
+        raise YouTubeError(f"daily upload limit reached ({max_per_day()}); "
+                           "it resets at midnight Pacific time")
+    resp = http.post(UPLOAD_URI, json=body, headers={
+        "Authorization": f"Bearer {access_token(http)}",
+        "X-Upload-Content-Type": "video/mp4",
+        "X-Upload-Content-Length": str(size)})
+    if resp.status_code != 200 or not resp.headers.get("Location"):
+        raise YouTubeError(_api_error("start the upload", resp))
+    record = {"key": key, "state": "uploading", "upload_url": resp.headers["Location"],
+              "body_hash": _body_hash(body),
+              "privacy": body["status"]["privacyStatus"],
+              "publish_at": body["status"].get("publishAt"),
+              "title": body["snippet"]["title"],
+              "started_at": _now_iso()}
+    _write_private(record_path(video_path), record)
+    note_upload()
+    return record
+
+
+def _finish(video_path, record, video, progress) -> dict:
+    record.update(state="uploaded", video_id=video["id"],
+                  url=f"https://youtube.com/shorts/{video['id']}",
+                  finished_at=_now_iso())
+    record.pop("upload_url", None)
+    _write_private(record_path(video_path), record)
+    if progress:
+        progress(1.0)
+    return record
+
+
+UPLOAD_RETRIES = 4
+
+
 def upload(video_path: str, body: dict, http: httpx.Client,
            progress: Optional[Callable[[float], None]] = None) -> dict:
-    """Upload once per file. Returns the publish record (with ``video_id``)."""
+    """Upload once per file. Returns the publish record (with ``video_id``).
+
+    A finished record is returned as ``duplicate`` (nothing is sent). An open session is
+    resumed only for the same request body; a changed title, privacy or schedule opens a
+    new session, so a retry can never publish with settings the caller no longer asked for.
+    """
     if not os.path.isfile(video_path):
         raise YouTubeError("video file not found")
     key = _file_key(video_path)
     record = read_record(video_path) or {}
     if record.get("key") == key and record.get("video_id"):
         return {**record, "duplicate": True}
-    token = access_token(http)
     size = os.path.getsize(video_path)
-    session = record.get("upload_url") if record.get("key") == key else None
-    if not session:
-        if uploads_today() >= max_per_day():
-            raise YouTubeError(f"daily upload limit reached ({max_per_day()}); "
-                               "it resets at midnight Pacific time")
-        resp = http.post(UPLOAD_URI, json=body, headers={
-            "Authorization": f"Bearer {token}", "X-Upload-Content-Type": "video/mp4",
-            "X-Upload-Content-Length": str(size)})
-        if resp.status_code != 200 or not resp.headers.get("Location"):
-            raise YouTubeError(_api_error("start the upload", resp))
-        session = resp.headers["Location"]
-        record = {"key": key, "state": "uploading", "upload_url": session,
-                  "privacy": body["status"]["privacyStatus"],
-                  "publish_at": body["status"].get("publishAt"),
-                  "title": body["snippet"]["title"],
-                  "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-        _write_private(record_path(video_path), record)
-        note_upload()
-    offset = _uploaded_bytes(http, session, size, token)
+    resumable = (record.get("key") == key and record.get("upload_url")
+                 and record.get("body_hash") == _body_hash(body))
+    if not resumable:
+        record = _open_session(video_path, body, http, key, size)
+    failures = 0
+    offset = None           # None: ask the server where the session stands
     with open(video_path, "rb") as f:
         while True:
-            if offset >= size:
-                break
-            f.seek(offset)
-            chunk = f.read(CHUNK)
-            end = offset + len(chunk) - 1
-            resp = http.put(session, content=chunk, headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Range": f"bytes {offset}-{end}/{size}"}, timeout=600)
+            try:
+                if offset is None:
+                    offset, video = _session_state(http, record["upload_url"], size)
+                    if video:
+                        # The last chunk was accepted but its answer never arrived.
+                        return _finish(video_path, record, video, progress)
+                    if offset < 0:
+                        # The session expired: start again from byte 0.
+                        record = _open_session(video_path, body, http, key, size)
+                        offset = 0
+                f.seek(offset)
+                chunk = f.read(CHUNK)
+                end = offset + len(chunk) - 1
+                resp = http.put(record["upload_url"], content=chunk, headers={
+                    "Authorization": f"Bearer {access_token(http)}",
+                    "Content-Range": f"bytes {offset}-{end}/{size}"}, timeout=600)
+            except httpx.HTTPError as e:
+                failures += 1
+                if failures > UPLOAD_RETRIES:
+                    raise YouTubeError(f"the upload lost its connection ({type(e).__name__}); "
+                                       "run it again to resume") from e
+                time.sleep(min(2 ** failures, 20))
+                offset = None
+                continue
             if resp.status_code == 308:
                 rng = resp.headers.get("Range", "")
                 offset = int(rng.split("-")[-1]) + 1 if rng else 0
+                failures = 0
                 if progress:
                     progress(offset / size)
                 continue
             if resp.status_code in (200, 201):
-                video = resp.json()
-                record.update(state="uploaded", video_id=video["id"],
-                              url=f"https://youtube.com/shorts/{video['id']}",
-                              finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
-                record.pop("upload_url", None)
-                _write_private(record_path(video_path), record)
-                if progress:
-                    progress(1.0)
-                return record
+                return _finish(video_path, record, resp.json(), progress)
+            if resp.status_code in (500, 502, 503, 504) and failures < UPLOAD_RETRIES:
+                failures += 1
+                time.sleep(min(2 ** failures, 20))
+                offset = None
+                continue
             raise YouTubeError(_api_error("upload the video", resp))
-    raise YouTubeError("upload ended without a video id")
 
 
-def _uploaded_bytes(http, session, size, token) -> int:
-    """How much of a resumed session the server already has."""
-    resp = http.put(session, headers={"Authorization": f"Bearer {token}",
+def _session_state(http, session, size):
+    """(bytes the server holds, finished video or None). -1 bytes: the session is gone."""
+    resp = http.put(session, headers={"Authorization": f"Bearer {access_token(http)}",
                                       "Content-Range": f"bytes */{size}"})
     if resp.status_code == 308:
         rng = resp.headers.get("Range", "")
-        return int(rng.split("-")[-1]) + 1 if rng else 0
+        return (int(rng.split("-")[-1]) + 1 if rng else 0), None
     if resp.status_code in (200, 201):
-        return size
+        try:
+            video = resp.json()
+        except ValueError:
+            video = None
+        if isinstance(video, dict) and video.get("id"):
+            return size, video
+        raise YouTubeError("YouTube finished the upload but did not return the video id; "
+                           "check YouTube Studio before uploading again")
     if resp.status_code in (404, 410):
-        raise YouTubeError("the upload session expired; start the upload again")
-    return 0
+        return -1, None
+    if resp.status_code in (500, 502, 503, 504):
+        raise httpx.TransportError(f"session probe {resp.status_code}")
+    raise YouTubeError(_api_error("resume the upload", resp))
 
 
 def _api_error(what, resp):
@@ -464,6 +534,13 @@ def _api_error(what, resp):
 # --------------------------------------------------------------------------- #
 # Auto-upload planning
 # --------------------------------------------------------------------------- #
+def _env_int(name, default):
+    try:
+        return int(str(os.environ.get(name, "")).strip() or default)
+    except ValueError:
+        return default
+
+
 def settings() -> dict:
     env = os.environ
     times = [t.strip() for t in env.get("YOUTUBE_SCHEDULE_TIMES", "").split(",") if t.strip()]
@@ -472,8 +549,8 @@ def settings() -> dict:
         "privacy": env.get("YOUTUBE_PRIVACY", "private").strip() or "private",
         "schedule_times": times,
         "timezone": env.get("YOUTUBE_TIMEZONE", "UTC").strip() or "UTC",
-        "max_per_job": int(env.get("YOUTUBE_MAX_PER_JOB", "3") or 3),
-        "min_score": int(env.get("YOUTUBE_MIN_SCORE", "60") or 60),
+        "max_per_job": _env_int("YOUTUBE_MAX_PER_JOB", 3),
+        "min_score": _env_int("YOUTUBE_MIN_SCORE", 60),
         "require_keep": env.get("YOUTUBE_REQUIRE_KEEP", "0").strip() == "1",
         "use_final": env.get("YOUTUBE_USE_FINAL", "1").strip() != "0",
         "category_id": env.get("YOUTUBE_CATEGORY_ID", "22").strip() or "22",
@@ -517,10 +594,13 @@ def next_slots(n: int, times: list, tz_name: str, taken: set, now: Optional[date
     parsed = []
     for t in times:
         try:
-            hh, mm = (int(x) for x in t.split(":"))
-            parsed.append((hh, mm))
+            hh, mm = (int(x) for x in str(t).strip().split(":")[:2])
         except ValueError:
             continue
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            parsed.append((hh, mm))
+    if not parsed:
+        return []
     out = []
     day = now.date()
     for _ in range(366):
@@ -549,6 +629,28 @@ def reserve_slot(iso: str):
         slots = sorted(set(data.get("slots") or []) | {iso})
         cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
         _write_private(path, {"slots": [s for s in slots if s >= cutoff]})
+
+
+def claim_slots(n: int, times: list, tz_name: str) -> list:
+    """Pick and reserve the next ``n`` slots in one step, so two jobs finishing together
+    never get the same publish time."""
+    with _lock:
+        path = os.path.join(state_dir(), "youtube_schedule.json")
+        data = _read_json(path) or {}
+        taken = set(data.get("slots") or [])
+        slots = next_slots(n, times, tz_name, taken)
+        if slots:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            _write_private(path, {"slots": [s for s in sorted(taken | set(slots)) if s >= cutoff]})
+        return slots
+
+
+def release_slot(iso: str):
+    """Give back a slot whose upload did not happen."""
+    with _lock:
+        path = os.path.join(state_dir(), "youtube_schedule.json")
+        data = _read_json(path) or {}
+        _write_private(path, {"slots": [s for s in (data.get("slots") or []) if s != iso]})
 
 
 def describe() -> dict:

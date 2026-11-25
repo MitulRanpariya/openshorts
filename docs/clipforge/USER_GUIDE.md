@@ -102,6 +102,17 @@ How the clips are chosen:
    - repeated stories and overlaps are removed;
    - whatever still looks wrong is flagged.
 
+### Where your clips are
+- **In the dashboard:** the clip cards appear under the job in **Clip Generator** as each clip finishes. Earlier jobs are listed in the job history on the same page; open one to see its clips again. Each card plays the clip and has **download** (the clip) and **final short** (the packaged version, once you made one).
+- **On disk:** `output/<job_id>/` inside the project folder. The clips are the `.mp4` files there:
+  - `…_clip_1.mp4`, `…_clip_2.mp4`: the clean vertical clips;
+  - files with a prefix before that name (hook and caption versions): what the card plays and downloads;
+  - `final_….mp4`: packaged shorts from **finish short**.
+- Jobs stay for `processing.job_retention_seconds` (30 days as configured), then they are deleted. Download or upload what you want to keep.
+
+### Hindi and Hinglish podcasts
+Hindi is transcribed in Devanagari. Sentences end on `।` as well as `. ! ?`, captions and cards use a Devanagari font installed on the system (e.g. Noto Sans Devanagari), and titles are written in the language of the episode. The "starts mid-thought" word check is English-only; the sentence and pause checks apply to every language.
+
 ## 5. Reviewing and finishing a clip (the clip card)
 
 Each card shows:

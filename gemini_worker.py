@@ -313,10 +313,9 @@ CLIP RULES:
 - Return only valid JSON.
 - Each clip must be {min_secs:g} to {max_secs:g} seconds long, in absolute seconds from the start of the source video.
 - Stay within the candidate window boundaries.
-- When a window lists `sentences` as [start_seconds, text], each clip must
-  START at one of those start times and END where its last sentence ends (the
-  next sentence's start time, or the window end). Never pick a time inside a
-  sentence.
+- When a window lists `sentences` as [start_seconds, end_seconds, text], each
+  clip must START at the start time of its first sentence and END at the end
+  time of its last sentence. Never pick a time inside a sentence.
 - THE 2-SECOND RULE: the clip MUST open on its strongest moment. If the first
   2 seconds would not stop a cold viewer from scrolling, move the start or skip the clip.
 - Start slightly before the hook and end slightly after the payoff when possible.

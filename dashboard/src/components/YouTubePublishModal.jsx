@@ -177,7 +177,7 @@ export default function YouTubePublishModal({ isOpen, onClose, jobId, clipIndex,
                 {error && <p className="text-xs text-warn">{error}</p>}
                 {result?.video_id && (
                     <p className="text-xs text-ok flex items-center gap-1">
-                        Uploaded ({result.privacy}{result.publish_at ? `, publishes ${new Date(result.publish_at).toLocaleString()}` : ''}):
+                        {result.duplicate ? 'Already uploaded earlier; nothing was sent again. To change the title or privacy, edit it in YouTube Studio. ' : 'Uploaded '}({result.privacy}{result.publish_at ? `, publishes ${new Date(result.publish_at).toLocaleString()}` : ''}):
                         <a href={result.url} target="_blank" rel="noreferrer" className="underline flex items-center gap-1">{result.url} <ExternalLink size={11} /></a>
                     </p>
                 )}

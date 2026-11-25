@@ -22,7 +22,10 @@ declaration. ClipForge does not verify it and does not give legal advice.
 3. `public`, or any `publish_at`, requires `rights_allow_public` to be true.
 4. `publish_at` must be at least 15 minutes in the future and carry a timezone.
 5. The local daily limit (`youtube.max_per_day`) must not be reached.
-6. The upload is idempotent: `<file>.publish.json` keyed by file name and size. A retry returns the existing video id, and a broken upload resumes its session.
+6. The upload is idempotent: `<file>.publish.json` keyed by file name and size. A retry returns the existing video id (reported as "already uploaded"; nothing is sent again).
+7. A broken upload resumes its session only for the same title, description, privacy and schedule. A changed request, or an expired session, starts a new upload, so a retry never publishes with settings you no longer asked for.
+8. A packaged final made from an older version of the clip (re-subtitled, recut or re-hooked since) is not uploaded; the current clip is.
+9. The attribution line is added to the description at upload time whenever it is missing.
 
 A warning is returned for third-party clips over 60 s: a Content ID claim blocks a long Short worldwide.
 

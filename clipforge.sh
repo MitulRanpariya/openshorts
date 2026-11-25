@@ -21,13 +21,25 @@ mkdir -p "$RUN"
 chmod 700 "$ROOT/.clipforge" 2>/dev/null || true
 export PATH="$HOME/.deno/bin:$PATH"
 
-port_busy() { ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"; }
+port_busy() {
+  # Read the whole listing first: grep -q under pipefail can report a busy port as free.
+  local listing; listing=$(ss -ltn 2>/dev/null | awk '{print $4}')
+  grep -E "[:.]$1\$" >/dev/null <<<"$listing"
+}
 free_port() {
   local p="$1"
   while port_busy "$p"; do p=$((p + 1)); done
   echo "$p"
 }
-alive() { [[ -f "$RUN/$1.pid" ]] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; }
+# A PID file can outlive its process (reboot, crash) and the number can be reused by
+# another program: a service is ours only while its working directory is this project.
+alive() {
+  [[ -f "$RUN/$1.pid" ]] || return 1
+  local pid cwd; pid=$(cat "$RUN/$1.pid")
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+  [[ -z "$cwd" || "$cwd" == "$ROOT" || "$cwd" == "$ROOT"/* ]]
+}
 
 cmd_setup() {
   command -v uv >/dev/null || { echo "Install uv first: https://docs.astral.sh/uv/"; exit 1; }
@@ -53,23 +65,33 @@ cmd_setup() {
 
 cmd_start() {
   [[ -x "$PY" ]] || { echo "Run ./clipforge.sh setup first."; exit 1; }
-  if alive backend; then echo "Already running (./clipforge.sh status)."; exit 0; fi
   local bp fp
-  bp=$(free_port "${BACKEND_PORT:-8000}")
-  fp=$(free_port "${FRONTEND_PORT:-5175}")
   cd "$ROOT"
-  nohup "$VENV/bin/uvicorn" app:app --host 127.0.0.1 --port "$bp" >"$RUN/backend.log" 2>&1 &
-  echo $! >"$RUN/backend.pid"
-  echo "$bp" >"$RUN/backend.port"
-  for _ in $(seq 1 60); do
-    curl -sf "http://127.0.0.1:$bp/api/config" >/dev/null && break
-    alive backend || { echo "Backend failed to start:"; tail -20 "$RUN/backend.log"; exit 1; }
-    sleep 1
-  done
-  (cd "$ROOT/dashboard" && VITE_PROXY_TARGET="http://127.0.0.1:$bp" \
-    nohup npx vite --host 127.0.0.1 --port "$fp" --strictPort >"$RUN/frontend.log" 2>&1 & echo $! >"$RUN/frontend.pid")
-  echo "$fp" >"$RUN/frontend.port"
-  sleep 3
+  if alive backend; then
+    bp=$(cat "$RUN/backend.port")
+  else
+    bp=$(free_port "${BACKEND_PORT:-8000}")
+    nohup "$VENV/bin/uvicorn" app:app --host 127.0.0.1 --port "$bp" >"$RUN/backend.log" 2>&1 &
+    echo $! >"$RUN/backend.pid"
+    echo "$bp" >"$RUN/backend.port"
+    for _ in $(seq 1 90); do
+      curl -sf "http://127.0.0.1:$bp/api/config" >/dev/null && break
+      alive backend || { echo "Backend failed to start:"; tail -20 "$RUN/backend.log"; exit 1; }
+      sleep 1
+    done
+  fi
+  if alive frontend; then
+    fp=$(cat "$RUN/frontend.port")
+  else
+    fp=$(free_port "${FRONTEND_PORT:-5175}")
+    # exec: the recorded PID is vite itself, so stop ends the listener and not a wrapper.
+    (cd "$ROOT/dashboard" && VITE_PROXY_TARGET="http://127.0.0.1:$bp" \
+      exec nohup node node_modules/vite/bin/vite.js --host 127.0.0.1 --port "$fp" --strictPort \
+      >"$RUN/frontend.log" 2>&1) &
+    echo $! >"$RUN/frontend.pid"
+    echo "$fp" >"$RUN/frontend.port"
+    sleep 3
+  fi
   echo "Backend : http://127.0.0.1:$bp   (API docs: /docs)"
   echo "Open    : http://127.0.0.1:$fp/#app"
 }
@@ -80,6 +102,9 @@ cmd_stop() {
       local pid; pid=$(cat "$RUN/$svc.pid")
       pkill -TERM -P "$pid" 2>/dev/null || true
       kill -TERM "$pid" 2>/dev/null || true
+      # Wait for it to go (the backend finishes its requests first), so a restart
+      # gets the same port back.
+      for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
       echo "stopped $svc (pid $pid)"
     fi
     rm -f "$RUN/$svc.pid"
@@ -98,7 +123,7 @@ case "${1:-}" in
   setup) cmd_setup ;;
   start) cmd_start ;;
   stop) cmd_stop ;;
-  restart) cmd_stop; sleep 1; cmd_start ;;
+  restart) cmd_stop; cmd_start ;;
   status) cmd_status ;;
   logs) tail -f "$RUN/backend.log" ;;
   test) cd "$ROOT" && "$PY" -m pytest tests/ -q && (cd dashboard && npm run lint && npm run build) ;;

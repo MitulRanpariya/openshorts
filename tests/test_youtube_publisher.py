@@ -32,11 +32,15 @@ def connect(expired=False):
 class FakeGoogle:
     """Token refresh + resumable upload in two chunks + channel lookup."""
 
-    def __init__(self, fail_first_put=False):
+    def __init__(self, fail_puts=0, drop_final=False, expire_first=False):
         self.received = 0
         self.size = None
         self.calls = []
-        self.fail_first_put = fail_first_put
+        self.fail_puts = fail_puts          # chunk PUTs answered 503
+        self.drop_final = drop_final        # the last chunk is stored, its answer is lost
+        self.expire_first = expire_first    # session 1 answers 404
+        self.sessions = 0
+        self.bodies = []
 
     def __call__(self, request: httpx.Request):
         self.calls.append((request.method, str(request.url)))
@@ -50,20 +54,33 @@ class FakeGoogle:
         if url.startswith("https://www.googleapis.com/upload/"):
             meta = json.loads(request.content)
             assert meta["status"]["privacyStatus"] in ytp.PRIVACY
+            self.bodies.append(meta)
             self.size = int(request.headers["X-Upload-Content-Length"])
-            return httpx.Response(200, headers={"Location": "https://upload.example/session/1"})
-        if url.startswith("https://upload.example/session/1"):
+            self.sessions += 1
+            self.received = 0
+            return httpx.Response(200, headers={
+                "Location": f"https://upload.example/session/{self.sessions}"})
+        if url.startswith("https://upload.example/session/"):
+            if self.expire_first and url.endswith("/1"):
+                return httpx.Response(404)
+            if not url.endswith(f"/{self.sessions}"):
+                return httpx.Response(404)
             rng = request.headers["Content-Range"]
             if rng.startswith("bytes */"):
+                if self.received >= self.size:
+                    return httpx.Response(200, json={"id": "VID123"})
                 if self.received == 0:
                     return httpx.Response(308)
                 return httpx.Response(308, headers={"Range": f"bytes=0-{self.received - 1}"})
-            if self.fail_first_put:
-                self.fail_first_put = False
+            if self.fail_puts:
+                self.fail_puts -= 1
                 return httpx.Response(503, json={"error": {"message": "backend error"}})
             self.received += len(request.content)
             if self.received < self.size:
                 return httpx.Response(308, headers={"Range": f"bytes=0-{self.received - 1}"})
+            if self.drop_final:
+                self.drop_final = False
+                raise httpx.ReadTimeout("lost", request=request)
             return httpx.Response(200, json={"id": "VID123"})
         if url.startswith(f"{ytp.API}/channels"):
             return httpx.Response(200, json={"items": [{"id": "UC1", "snippet": {"title": "My Channel"}}]})
@@ -119,19 +136,102 @@ def test_resumable_upload_in_chunks_then_idempotent(tmp_path):
     assert ytp.uploads_today() == 1
 
 
-def test_interrupted_upload_resumes_same_session(tmp_path):
-    connect()
-    fake = FakeGoogle(fail_first_put=True)
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr(ytp.time, "sleep", lambda _s: None)
+
+
+def _upload(fake, tmp_path, size=2000, body=None):
     http = httpx.Client(transport=httpx.MockTransport(fake))
-    path = video(tmp_path, size=2000)
-    body = ytp.build_body("T", "", privacy="private")
+    path = video(tmp_path, size=size)
+    return path, http, body or ytp.build_body("T", "", privacy="private")
+
+
+def test_a_failing_chunk_is_retried_in_the_same_session(tmp_path, no_sleep):
+    connect()
+    fake = FakeGoogle(fail_puts=2)
+    path, http, body = _upload(fake, tmp_path)
+    assert ytp.upload(path, body, http)["video_id"] == "VID123"
+    assert fake.sessions == 1 and ytp.uploads_today() == 1
+
+
+def test_an_upload_that_keeps_failing_resumes_on_the_next_call(tmp_path, no_sleep):
+    connect()
+    fake = FakeGoogle(fail_puts=50)
+    path, http, body = _upload(fake, tmp_path)
     with pytest.raises(ytp.YouTubeError):
         ytp.upload(path, body, http)
     assert ytp.read_record(path)["upload_url"]
-    rec = ytp.upload(path, body, http)                      # resumes, no new session
-    assert rec["video_id"] == "VID123"
-    starts = [c for c in fake.calls if "upload/youtube" in c[1]]
-    assert len(starts) == 1 and ytp.uploads_today() == 1
+    fake.fail_puts = 0
+    assert ytp.upload(path, body, http)["video_id"] == "VID123"   # resumes, no new session
+    assert fake.sessions == 1 and ytp.uploads_today() == 1
+
+
+def test_a_lost_final_answer_still_yields_the_video_id(tmp_path, no_sleep):
+    # YouTube stored the last chunk but the reply never arrived: the probe's 200 carries
+    # the video, and the record must be finished from it (it used to fail forever).
+    connect()
+    fake = FakeGoogle(drop_final=True)
+    path, http, body = _upload(fake, tmp_path)
+    rec = ytp.upload(path, body, http)
+    assert rec["video_id"] == "VID123" and rec["state"] == "uploaded"
+    assert fake.sessions == 1
+
+
+def test_an_expired_session_is_replaced(tmp_path, no_sleep):
+    connect()
+    fake = FakeGoogle(fail_puts=50)
+    path, http, body = _upload(fake, tmp_path)
+    with pytest.raises(ytp.YouTubeError):
+        ytp.upload(path, body, http)
+    fake.fail_puts, fake.expire_first = 0, True
+    assert ytp.upload(path, body, http)["video_id"] == "VID123"
+    assert fake.sessions == 2
+    assert "upload_url" not in ytp.read_record(path)
+
+
+def test_a_changed_request_never_resumes_the_old_session(tmp_path, no_sleep):
+    # A public attempt that broke must not be completed by a later private retry.
+    connect()
+    fake = FakeGoogle(fail_puts=50)
+    path, http, body = _upload(fake, tmp_path, body=ytp.build_body("T", "", privacy="public"))
+    with pytest.raises(ytp.YouTubeError):
+        ytp.upload(path, body, http)
+    fake.fail_puts = 0
+    rec = ytp.upload(path, ytp.build_body("T", "", privacy="private"), http)
+    assert rec["privacy"] == "private" and fake.sessions == 2
+    assert fake.bodies[-1]["status"]["privacyStatus"] == "private"
+
+
+def test_cc0_needs_no_attribution():
+    assert ytp.rights_allow_public({"category": "cc", "license": "CC0 1.0"})[0]
+    assert not ytp.rights_allow_public({"category": "cc", "license": "CC BY 4.0"})[0]
+
+
+def test_tag_list_stays_under_youtubes_limit():
+    body = ytp.build_body("T", "", [f"tag number {i} " + "x" * 40 for i in range(30)])
+    tags = body["snippet"]["tags"]
+    assert sum(len(t) + 3 for t in tags) <= 500 and tags
+
+
+def test_bad_schedule_times_are_ignored():
+    now = datetime(2026, 11, 25, 6, 0, tzinfo=timezone.utc)
+    assert ytp.next_slots(1, ["25:00", "x", "9:30:00"], "UTC", set(), now=now) == \
+        ["2026-11-25T09:30:00Z"]
+    assert ytp.next_slots(1, ["25:00"], "UTC", set(), now=now) == []
+
+
+def test_claimed_slots_are_never_handed_out_twice():
+    first = ytp.claim_slots(2, ["18:00"], "UTC")
+    second = ytp.claim_slots(2, ["18:00"], "UTC")
+    assert len(first) == 2 and not set(first) & set(second)
+    ytp.release_slot(first[0])
+    assert ytp.claim_slots(1, ["18:00"], "UTC") == [first[0]]
+
+
+def test_settings_survive_a_non_numeric_value(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_MAX_PER_JOB", "three")
+    assert ytp.settings()["max_per_job"] == 3
 
 
 def test_daily_limit_blocks_new_uploads(tmp_path, monkeypatch):

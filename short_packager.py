@@ -26,6 +26,7 @@ import os
 import subprocess
 import tempfile
 import time
+import unicodedata
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Optional
@@ -124,9 +125,40 @@ def probe(path):
 # --------------------------------------------------------------------------- #
 # Cards (PIL)
 # --------------------------------------------------------------------------- #
-def _font(size):
+_fallback_fonts = {}
+
+
+def _font_file(text):
+    """The brand font, or a system font that has the text's script (Hindi, Arabic, CJK…):
+    the brand font is Latin only and would draw empty boxes."""
     try:
-        return ImageFont.truetype(TITLE_FONT, size)
+        from fontTools.ttLib import TTFont
+        if "cmap" not in _fallback_fonts:
+            _fallback_fonts["cmap"] = set(TTFont(TITLE_FONT, lazy=True).getBestCmap())
+        missing = next((ch for ch in str(text or "") if not ch.isspace()
+                        and ord(ch) > 0x2FF and ord(ch) not in _fallback_fonts["cmap"]
+                        and not 0x1F000 <= ord(ch) <= 0x1FAFF and not 0x2000 <= ord(ch) <= 0x2BFF
+                        and unicodedata.category(ch)[0] == "L"), None)
+    except Exception:  # noqa: BLE001
+        missing = None
+    if missing is None:
+        return TITLE_FONT
+    block = ord(missing) >> 7
+    if block not in _fallback_fonts:
+        found = ""
+        try:
+            found = subprocess.run(
+                ["fc-match", "-f", "%{file}", f":charset={ord(missing):x}:weight=bold"],
+                capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        _fallback_fonts[block] = found if found and os.path.isfile(found) else TITLE_FONT
+    return _fallback_fonts[block]
+
+
+def _font(size, text=""):
+    try:
+        return ImageFont.truetype(_font_file(text), size)
     except OSError:
         return ImageFont.load_default()
 
@@ -182,9 +214,9 @@ def render_card(background_png, size, title="", subtitle="", accent=(255, 229, 0
     base = Image.blend(base, Image.new("RGB", (w, h), (0, 0, 0)), 0.55)
     spec = []
     if title:
-        spec.append((title, _font(int(w * 0.085)), accent))
+        spec.append((title, _font(int(w * 0.085), title), accent))
     if subtitle:
-        spec.append((subtitle, _font(int(w * 0.05)), (255, 255, 255)))
+        spec.append((subtitle, _font(int(w * 0.05), subtitle), (255, 255, 255)))
     if spec:
         _draw_block(base, spec, h * 0.45)
     return base
@@ -195,7 +227,7 @@ def render_text_overlay(size, text, rel_y=0.055, rel_size=0.03):
     w, h = size
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    font = _font(max(14, int(w * rel_size)))
+    font = _font(max(14, int(w * rel_size)), text)
     line = text if draw.textlength(text, font=font) <= w * 0.9 else \
         _wrap(draw, text, font, int(w * 0.9))[0] + "…"
     lw = draw.textlength(line, font=font)

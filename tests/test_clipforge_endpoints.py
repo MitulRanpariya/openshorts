@@ -195,3 +195,33 @@ def test_scheduled_upload_needs_future_time(job, yt):
 def test_youtube_status_without_connection(yt):
     d = _request("GET", "/api/youtube/status").json()
     assert d["connected"] is False and d["channel"] is None
+
+
+def test_an_editor_with_a_stale_copy_keeps_what_clipforge_stored(job):
+    # A subtitle burn read the metadata, rendered for a minute and writes its copy back:
+    # the review, the rights and the upload saved in the meantime must survive it.
+    stale = _meta(job)
+    current = _meta(job)
+    current["rights"] = {"category": "own"}
+    current["shorts"][0].update(review={"decision": "keep"}, youtube={"video_id": "V1"})
+    job["meta"].write_text(json.dumps(current))
+    stale["shorts"][0]["video_url"] = "/videos/x/sub_t_clip_1.mp4"
+    app_module._write_clip_metadata(str(job["meta"]), stale)
+    saved = _meta(job)
+    assert saved["rights"] == {"category": "own"}
+    assert saved["shorts"][0]["review"] == {"decision": "keep"}
+    assert saved["shorts"][0]["youtube"] == {"video_id": "V1"}
+    assert saved["shorts"][0]["video_url"].endswith("sub_t_clip_1.mp4")   # the edit itself
+
+
+def test_a_final_packaged_from_an_older_clip_is_not_uploaded(job):
+    (job["dir"] / "final_1_ab_t_clip_1.mp4").write_bytes(b"x")
+    data = _meta(job)
+    data["shorts"][0]["final"] = {"file": "final_1_ab_t_clip_1.mp4", "source": "t_clip_1.mp4"}
+    pick = lambda: app_module._clip_upload_file(      # noqa: E731
+        app_module.jobs[JOB_ID], str(job["dir"]), data, 0, True)[0]
+    assert pick().endswith("final_1_ab_t_clip_1.mp4")
+    data["shorts"][0]["final"]["source"] = "sub_old_t_clip_1.mp4"   # the clip changed since
+    assert pick().endswith("/t_clip_1.mp4")
+    data["shorts"][0]["final"] = {"file": "../../etc/passwd"}       # never a path
+    assert pick().endswith("/t_clip_1.mp4")

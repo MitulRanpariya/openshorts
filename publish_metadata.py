@@ -72,7 +72,7 @@ def _clean_tags(tags):
         if len(t) > 1 and t.lower() not in (x.lower() for x in out):
             out.append(t)
     if "#shorts" not in (x.lower() for x in out):
-        out.append("#shorts")
+        out = out[:5] + ["#shorts"]
     return out[:6]
 
 

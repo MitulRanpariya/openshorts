@@ -159,3 +159,13 @@ def test_youtube_lists_become_comma_separated(tmp_path):
     assert v["YOUTUBE_DEFAULT_TAGS"] == "podcast,habits"
     assert v["YOUTUBE_AUTO_UPLOAD"] == "1"
     assert v["YOUTUBE_OAUTH_CLIENT_FILE"] == str(tmp_path / "client.json")
+
+
+def test_yaml_scalar_traps(tmp_path):
+    # Unquoted 18:00 is the base-60 number 1080 in YAML 1.1; a quoted "false" is a string.
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("youtube:\n  schedule_times: [18:00, '21:30']\n"
+                   "render:\n  speech_cleanup: 'false'\n  quality_checks: yes\n")
+    env = cc.load(cfg)
+    assert env["YOUTUBE_SCHEDULE_TIMES"] == "18:00,21:30"
+    assert env["SPEECH_CLEANUP"] == "0" and env["RENDER_QC"] == "1"

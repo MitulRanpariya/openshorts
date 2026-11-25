@@ -140,3 +140,31 @@ def test_prompt_injection_in_transcript_is_only_data():
     clips = [{"start": sents[0]["start"], "end": sents[1]["end"], "predicted_score": 50}]
     cb.refine_all(clips, ws, 100.0, min_d=1, max_d=60)
     assert clips[0]["predicted_score"] == 50
+
+
+def test_end_in_the_pause_after_a_sentence_does_not_pull_the_next_one_in():
+    # The model ends a clip where its last sentence ends, or at "the next sentence's
+    # start": both lie in the pause, and neither may add a sentence.
+    ws = timeline(["First point is here now.", "Second point lands well.",
+                   "Third thing nobody asked for."])
+    sents = cb.sentences(ws)
+    for end in (sents[1]["end"], sents[1]["end"] + 0.1, sents[2]["start"]):
+        s, e = cb.refine_range(sents[0]["start"], end, sents, 1, 60)
+        assert e == sents[1]["end"], end
+    # Mid-sentence still completes the sentence being spoken.
+    mid = (sents[1]["start"] + sents[1]["end"]) / 2
+    assert cb.refine_range(sents[0]["start"], mid, sents, 1, 60)[1] == sents[1]["end"]
+
+
+def test_hindi_danda_ends_a_sentence_and_words_keep_their_vowels():
+    ws = timeline(["मैं ठीक हूँ।", "क्या आप ठीक हैं?", "बहुत अच्छी किताब है।"])
+    assert len(cb.sentences(ws)) == 3
+    assert cb._clean("किताब।") == "किताब" and cb._clean("बहुत,") == "बहुत"
+    assert cb.QUESTION.search("हैं?")
+
+
+def test_window_id_is_matched_by_number():
+    clip = {"start": 1, "end": 20, "source_window_id": "7"}
+    assert cb.valid_proposal(clip, 100, {"window_007"})
+    assert cb.valid_proposal({**clip, "source_window_id": "window_7"}, 100, {"window_007"})
+    assert not cb.valid_proposal({**clip, "source_window_id": "window_9"}, 100, {"window_007"})

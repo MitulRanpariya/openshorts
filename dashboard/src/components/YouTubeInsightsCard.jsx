@@ -24,12 +24,19 @@ export default function YouTubeInsightsCard() {
 
     const load = useCallback(async () => {
         try {
+            const read = async (url) => {
+                const res = await apiFetch(url);
+                const body = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(body.detail || `request failed (${res.status})`);
+                return body;
+            };
             const [s, r] = await Promise.all([
-                apiFetch('/api/youtube/status').then((x) => x.json()),
-                apiFetch(`/api/youtube/insights?metric=${metric}`).then((x) => x.json()),
+                read('/api/youtube/status'),
+                read(`/api/youtube/insights?metric=${metric}`),
             ]);
             setStatus(s);
             setReport(r);
+            setError('');
         } catch (e) {
             setError(e.message || String(e));
         }
@@ -65,15 +72,17 @@ export default function YouTubeInsightsCard() {
                 </button>
             </div>
             {error && <p className="text-xs text-warn">{error}</p>}
+            {report && (
+                <div className="flex items-center gap-2 text-xs">
+                    <span className="text-muted">compare by</span>
+                    <select value={metric} onChange={(e) => setMetric(e.target.value)} className="bg-paper border border-rule rounded-input px-2 py-1">
+                        {METRICS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                    </select>
+                    <span className="text-muted">n = {report.sample_size}</span>
+                </div>
+            )}
             {report && report.sample_size > 0 && (
                 <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-xs">
-                        <span className="text-muted">compare by</span>
-                        <select value={metric} onChange={(e) => setMetric(e.target.value)} className="bg-paper border border-rule rounded-input px-2 py-1">
-                            {METRICS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
-                        </select>
-                        <span className="text-muted">n = {report.sample_size}</span>
-                    </div>
                     <p className="text-[11px] text-muted">{report.note}</p>
                     {Object.entries(report.groups || {}).map(([feature, groups]) => (
                         <div key={feature} className="text-xs">
@@ -101,7 +110,7 @@ export default function YouTubeInsightsCard() {
                 </ul>
             )}
             {report && report.sample_size === 0 && (
-                <p className="text-xs text-muted">No uploaded clips with metrics yet. Upload some, then refresh (YouTube reports with a delay of a day or two).</p>
+                <p className="text-xs text-muted">No uploaded clips have this metric yet. Try another one above (views arrive first), or refresh later: YouTube reports watch-time with a delay of a day or two.</p>
             )}
         </div>
     );
